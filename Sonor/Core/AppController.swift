@@ -4,10 +4,34 @@ import Combine
 import AVFoundation
 import CoreAudio
 
+/// Holds the 20 Hz waveform data on its own so that only the waveform view redraws.
+/// Publishing this from `AppController` rebuilt the whole HUD tree 20 times per second.
+@MainActor
+final class AudioLevelStore: ObservableObject {
+    static let barCapacity = 40
+    @Published private(set) var levels: [Float] = Array(repeating: 0.01, count: barCapacity)
+
+    func append(_ level: Float) {
+        levels.append(level)
+        if levels.count > Self.barCapacity {
+            levels.removeFirst(levels.count - Self.barCapacity)
+        }
+    }
+
+    func reset() {
+        levels = Array(repeating: 0.01, count: Self.barCapacity)
+    }
+}
+
 @MainActor
 class AppController: NSObject, ObservableObject {
     
-    @Published var isRecording = false
+    @Published var isRecording = false {
+        didSet {
+            // Shortcuts bound to a bare character key are only claimed while a recording runs.
+            HotkeyManager.shared.setRecordingActive(isRecording)
+        }
+    }
     @Published var activeDictionaryNotification: DictionaryNotification? = nil
     @Published var activeCopyNotification: String? = nil
     @Published var isPopoverOpen = false
@@ -30,8 +54,7 @@ class AppController: NSObject, ObservableObject {
         let nonProcessingStatuses: Set<String> = ["Ready", "Cancelled", "No microphone permission", "Microphone error", "No text recognized.", "Error: Missing model", "Done!", "Transcription failed"]
         return !isRecording && !nonProcessingStatuses.contains(statusText) && !statusText.hasPrefix("Mode:")
     }
-    @Published var audioLevel: Float = 0.0
-    @Published var audioLevels: [Float] = Array(repeating: 0.01, count: 40)
+    let audioLevelStore = AudioLevelStore()
     @Published var availableModes: [VoiceMode] = []
     @Published var currentMode: VoiceMode? {
         didSet {
@@ -74,8 +97,8 @@ class AppController: NSObject, ObservableObject {
         super.init()
         let modes = VoiceMode.loadAndMigrateModes()
         self.availableModes = modes
-        let activeModeID = UserDefaults.standard.string(forKey: "activeModeID") ?? ""
-        self.currentMode = modes.first(where: { $0.id.uuidString == activeModeID }) ?? modes.first
+        // A launch always starts on the assistant chosen as the default.
+        self.currentMode = VoiceMode.resolveDefault(in: modes)
         if let current = self.currentMode {
             TranscriptionManager.shared.applyModelOverride(current.modelOverride)
         }
@@ -166,9 +189,9 @@ class AppController: NSObject, ObservableObject {
         if isCurrentlyProcessing || terminalStates.contains(statusText) {
             return
         }
-        let isGemmaDownloaded = ModelManager.shared.gemmaState == .downloaded
-        let functionalModes = availableModes.filter { mode in
-            isGemmaDownloaded || mode.prompt.isEmpty
+        // Each assistant may point at a different model, so availability is per assistant.
+        let functionalModes = VoiceMode.active(in: availableModes).filter { mode in
+            mode.prompt.isEmpty || LLMManager.shared.isAvailable(for: mode)
         }
         guard !functionalModes.isEmpty else { return }
         guard functionalModes.count > 1 else {
@@ -206,7 +229,9 @@ class AppController: NSObject, ObservableObject {
         let modes = VoiceMode.loadAndMigrateModes()
         self.availableModes = modes
         let activeModeID = UserDefaults.standard.string(forKey: "activeModeID") ?? ""
-        self.currentMode = modes.first(where: { $0.id.uuidString == activeModeID }) ?? modes.first
+        // Keep the running selection, unless it was disabled or deleted in the dashboard.
+        let stillUsable = modes.first(where: { $0.id.uuidString == activeModeID && $0.isActive })
+        self.currentMode = stillUsable ?? VoiceMode.resolveDefault(in: modes)
         if let current = self.currentMode {
             TranscriptionManager.shared.applyModelOverride(current.modelOverride)
         }
@@ -265,7 +290,7 @@ class AppController: NSObject, ObservableObject {
                 }
                 return
             }
-            let selectedMode = currentMode ?? availableModes.first ?? VoiceMode.defaults.first!
+            let selectedMode = currentMode ?? VoiceMode.resolveDefault(in: availableModes) ?? VoiceMode.defaults[0]
             if self.currentMode?.id != selectedMode.id {
                 self.selectMode(selectedMode)
             }
@@ -344,18 +369,12 @@ class AppController: NSObject, ObservableObject {
                     Task { @MainActor in
                         while self.isRecording {
                             if !self.isPaused {
-                                let level = self.audioManager.audioLevel
-                                self.audioLevel = level
-                                self.audioLevels.append(max(0.01, level))
-                                if self.audioLevels.count > 40 {
-                                    self.audioLevels.removeFirst()
-                                }
+                                let level = self.audioManager.currentLevel
+                                self.audioLevelStore.append(level.isFinite ? max(0.01, level) : 0.01)
                             }
                             try? await Task.sleep(nanoseconds: 50_000_000)
                         }
-                        withAnimation {
-                            self.audioLevels = Array(repeating: 0.01, count: 40)
-                        }
+                        self.audioLevelStore.reset()
                     }
                 }
             } catch {
@@ -389,6 +408,11 @@ class AppController: NSObject, ObservableObject {
         TranscriptionManager.shared.applyModelOverride(mode.modelOverride)
         Task {
             try? await TranscriptionManager.shared.ensureEngineReady()
+            // A mode switch outside a recording warms the model with nothing scheduled to
+            // release it. The countdown is restarted so the idle rules still apply.
+            if !self.isRecording && !self.isCurrentlyProcessing {
+                TranscriptionManager.shared.resetUnloadTimer()
+            }
         }
     }
     func cancelRecording() {
@@ -411,9 +435,7 @@ class AppController: NSObject, ObservableObject {
         }
         
         MediaControlService.shared.resumeMultimedia()
-        withAnimation {
-            self.audioLevels = Array(repeating: 0.01, count: 40)
-        }
+        self.audioLevelStore.reset()
         let modeStr = UserDefaults.standard.string(forKey: "hudPositionMode") ?? "free"
         let isNotchMode = (modeStr == "notch")
         
@@ -544,9 +566,9 @@ class AppController: NSObject, ObservableObject {
                     await MainActor.run {
                         let appName = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Unknown App"
                         let whisperModel = TranscriptionManager.shared.activeModelName
-                        let gemmaModel = "Gemma 3"
+                        let llmModelLabel = LLMManager.shared.activeModelLabel(for: selectedMode)
                         let shouldRunLLM = !selectedMode.prompt.isEmpty
-                        MessageMemoryManager.shared.updateMessage(id: historyMessageID, newText: t("Transcription failed"), isError: true, appName: appName, transcriptionModel: whisperModel, llmModel: shouldRunLLM ? gemmaModel : nil, modeName: selectedMode.name, updateMetadata: true)
+                        MessageMemoryManager.shared.updateMessage(id: historyMessageID, newText: t("Transcription failed"), isError: true, appName: appName, transcriptionModel: whisperModel, llmModel: shouldRunLLM ? llmModelLabel : nil, modeName: selectedMode.name, updateMetadata: true)
                     }
                 }
             } else {
@@ -554,9 +576,9 @@ class AppController: NSObject, ObservableObject {
                     await MainActor.run {
                         let appName = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Unknown App"
                         let whisperModel = TranscriptionManager.shared.activeModelName
-                        let gemmaModel = "Gemma 3"
+                        let llmModelLabel = LLMManager.shared.activeModelLabel(for: selectedMode)
                         let shouldRunLLM = !selectedMode.prompt.isEmpty
-                        MessageMemoryManager.shared.updateMessage(id: historyMessageID, newText: t("Transcription failed"), isError: true, appName: appName, transcriptionModel: whisperModel, llmModel: shouldRunLLM ? gemmaModel : nil, modeName: selectedMode.name, updateMetadata: true)
+                        MessageMemoryManager.shared.updateMessage(id: historyMessageID, newText: t("Transcription failed"), isError: true, appName: appName, transcriptionModel: whisperModel, llmModel: shouldRunLLM ? llmModelLabel : nil, modeName: selectedMode.name, updateMetadata: true)
                         withAnimation(.spring(response: 0.5, dampingFraction: 0.6, blendDuration: 0.3)) {
                             self.statusText = "Transcription failed"
                             self.failedAudioSamples = samples
@@ -574,10 +596,10 @@ class AppController: NSObject, ObservableObject {
                         }
                         let appName = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Unknown App"
                         let whisperModel = TranscriptionManager.shared.activeModelName
-                        let gemmaModel = "Gemma 3"
+                        let llmModelLabel = LLMManager.shared.activeModelLabel(for: selectedMode)
                         let shouldRunLLM = !selectedMode.prompt.isEmpty
                         
-                        let msgId = MessageMemoryManager.shared.saveMessage(t("Transcription failed"), samples: samples, isError: true, appName: appName, transcriptionModel: whisperModel, llmModel: shouldRunLLM ? gemmaModel : nil, modeName: selectedMode.name)
+                        let msgId = MessageMemoryManager.shared.saveMessage(t("Transcription failed"), samples: samples, isError: true, appName: appName, transcriptionModel: whisperModel, llmModel: shouldRunLLM ? llmModelLabel : nil, modeName: selectedMode.name)
                         self.failedHistoryMessageID = msgId
                     }
                 }

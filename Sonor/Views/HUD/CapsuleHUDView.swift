@@ -2,20 +2,50 @@ import SwiftUI
 import Combine
 import AppKit
 
+/// Draws the 20 Hz waveform. It observes only `AudioLevelStore`, so the level updates do not
+/// invalidate the surrounding HUD buttons, glass surfaces and mode selector.
+struct AudioWavesView: View {
+    @ObservedObject var levelStore: AudioLevelStore
+    let barCount: Int
+    let isPaused: Bool
+    let textColor: Color
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(Array(levelStore.levels.suffix(barCount).enumerated()), id: \.offset) { _, level in
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(isPaused ? textColor.opacity(0.4) : textColor)
+                    .frame(width: 3, height: min(CGFloat(2 + (level * 350)), 40))
+            }
+        }
+    }
+}
+
 struct CapsuleHUDView: View {
     @ObservedObject var controller: AppController
+    // `LLMManager.shared.isAvailable` reads these two objects, so the assistant selector
+    // appears as soon as a local model finishes downloading or an API endpoint is saved.
     @ObservedObject var modelManager = ModelManager.shared
+    @ObservedObject var llmSettings = LLMSettings.shared
+    /// The HUD panel is only ordered out, never closed, so SwiftUI keeps rendering it while
+    /// it is offscreen. The spinner's `TimelineView(.animation)` then redrew the hidden HUD
+    /// at display rate forever (about 15% CPU after every dictation). This flag pauses it.
+    @State private var isHUDVisible = false
     @AppStorage("appTheme") private var appTheme = "system"
     @AppStorage("hudPositionMode") private var hudPositionMode: HUDPositionMode = .free
     @AppStorage("overlayDuration") private var overlayDuration: Double = 15.0
+    /// The HUD panel forces a dark NSAppearance, so `@Environment(\.colorScheme)` cannot report
+    /// the real system theme here. The value is cached and refreshed on theme changes instead:
+    /// reading `AppleInterfaceStyle` inside `textColor` cost one UserDefaults lookup per
+    /// waveform bar, roughly 1400 lookups per second while recording.
+    @State private var systemIsDark = SystemAppearance.prefersDark()
     var effectiveColorScheme: ColorScheme {
         if appTheme == "dark" {
             return .dark
         } else if appTheme == "light" {
             return .light
         } else {
-            let appleInterfaceStyle = UserDefaults.standard.string(forKey: "AppleInterfaceStyle")
-            return appleInterfaceStyle == "Dark" ? .dark : .light
+            return systemIsDark ? .dark : .light
         }
     }
     private var isInitializing: Bool {
@@ -49,7 +79,7 @@ struct CapsuleHUDView: View {
     @State private var isPasted: Bool = false
     @State private var isUndone: Bool = false
     @State private var hoveredButton: String? = nil
-    private let recordingTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
+
     private var assistantSelector: some View {
         Button(action: {
             if !dragTracker.isDragging { withAnimation { showList.toggle() } }
@@ -59,7 +89,7 @@ struct CapsuleHUDView: View {
                     Text(t(controller.currentMode?.name ?? "Wybierz tryb"))
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.primary)
-                        .id(controller.currentMode?.id ?? UUID())
+                        .id(controller.currentMode?.id)
                         .transition(.asymmetric(
                             insertion: .move(edge: .bottom).combined(with: .opacity),
                             removal: .move(edge: .top).combined(with: .opacity)
@@ -86,20 +116,15 @@ struct CapsuleHUDView: View {
     }
     private var audioWavesView: some View {
         let barCount = width > 200 ? 31 : 21
-        let levels = Array(controller.audioLevels.suffix(barCount))
         return HStack(spacing: 0) {
             Spacer()
                 .frame(width: 14)
-            HStack(spacing: 2) {
-                ForEach(0..<levels.count, id: \.self) { index in
-                    let level = levels[index]
-                    let barHeight = CGFloat(2 + (level * 350))
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(controller.isPaused ? textColor.opacity(0.4) : textColor)
-                        .frame(width: 3, height: min(barHeight, 40))
-                        .animation(.spring(response: 0.1, dampingFraction: 0.5), value: level)
-                }
-            }
+            AudioWavesView(
+                levelStore: controller.audioLevelStore,
+                barCount: barCount,
+                isPaused: controller.isPaused,
+                textColor: textColor
+            )
             Spacer()
                 .frame(width: 14)
             if controller.isRecording {
@@ -133,7 +158,7 @@ struct CapsuleHUDView: View {
                 ))
             Spacer()
             if !controller.canRetryTranscription {
-                TimelineView(.animation) { timeline in
+                TimelineView(.animation(paused: !isHUDVisible)) { timeline in
                     let time = timeline.date.timeIntervalSinceReferenceDate
                     let angle = time.truncatingRemainder(dividingBy: 1.0) * 360.0
                     Circle()
@@ -151,10 +176,13 @@ struct CapsuleHUDView: View {
         .padding(.horizontal, 14)
         .frame(width: width, height: 40)
     }
+    private var selectableModes: [VoiceMode] {
+        VoiceMode.active(in: controller.availableModes)
+    }
     private var dropdownListView: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 2) {
-                ForEach(controller.availableModes) { mode in
+                ForEach(selectableModes) { mode in
                     Button(action: {
                         controller.selectMode(mode)
                         withAnimation { showList = false }
@@ -193,7 +221,7 @@ struct CapsuleHUDView: View {
             }
         }
         .frame(width: 284)
-        .frame(height: min(CGFloat(controller.availableModes.count) * 30 + 8, 200))
+        .frame(height: min(CGFloat(selectableModes.count) * 30 + 8, 200))
         .glass(cornerRadius: 12, opacity: 0.7, colorScheme: effectiveColorScheme)
         .transition(.asymmetric(
             insertion: .offset(y: 10).combined(with: .opacity),
@@ -415,7 +443,7 @@ struct CapsuleHUDView: View {
                         .zIndex(2)
                 } else {
                     VStack(spacing: 8) {
-                        if modelManager.gemmaState == .downloaded {
+                        if LLMManager.shared.isAvailable {
                             if !isInitializing && !isFinalState && controller.isRecording {
                                 assistantSelector
                                     .transition(.asymmetric(insertion: .offset(y: 40).combined(with: .scale(scale: 0.1)).combined(with: .opacity), removal: .offset(y: 40).combined(with: .scale(scale: 0.1)).combined(with: .opacity)))
@@ -516,9 +544,16 @@ struct CapsuleHUDView: View {
             controller.reloadModes()
             showPauseButton = controller.isRecording
             width = targetWidth
+            isHUDVisible = true
             withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
                 hasAppeared = true
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("HUDWindowDidShow"))) { _ in
+            isHUDVisible = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("HUDWindowDidHide"))) { _ in
+            isHUDVisible = false
         }
         .onChange(of: controller.isRecording) {
             if !controller.isRecording {
@@ -568,13 +603,24 @@ struct CapsuleHUDView: View {
                 showList = false
             }
         }
-        .onReceive(recordingTimer) { _ in
-            if controller.isRecording && !controller.isPaused && !controller.statusText.hasPrefix("Initializing") {
-                recordingDuration += 1
+        // A `Timer.publish` here kept waking the app once per second forever, because the HUD
+        // panel is only ordered out and never releases its hosting view. This ticks only while
+        // a recording is actually running.
+        .task(id: controller.isRecording) {
+            guard controller.isRecording else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                if controller.isRecording && !controller.isPaused && !controller.statusText.hasPrefix("Initializing") {
+                    recordingDuration += 1
+                }
             }
         }
         .onChange(of: hudPositionMode) { _, newMode in
             WindowManager.shared.updateHUDPosition(for: newMode)
+        }
+        .onReceive(DistributedNotificationCenter.default().publisher(for: SystemAppearance.themeChangedNotification)) { _ in
+            systemIsDark = SystemAppearance.prefersDark()
         }
     }
     var dragGesture: some Gesture {

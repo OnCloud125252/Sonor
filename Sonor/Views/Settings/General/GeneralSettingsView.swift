@@ -22,6 +22,7 @@ struct GeneralSettingsView: View {
     @AppStorage("playSound_End") private var playSound_End = true
     @ObservedObject private var memoryManager = MessageMemoryManager.shared
     @ObservedObject private var modelManager = ModelManager.shared
+    @ObservedObject private var llmSettings = LLMSettings.shared
     @State private var isShowingSwitchToRamAlert = false
     @State private var isShowingDeleteAudioAlert = false
     @State private var isShowingDuplicateShortcutAlert = false
@@ -109,6 +110,12 @@ struct GeneralSettingsView: View {
         }
         .onDisappear {
             removeEventMonitor()
+            // Recording a shortcut stops the global tap. Leaving this screen mid-capture used
+            // to keep the hotkey dead until the app was restarted.
+            if activeRecordingType != nil {
+                activeRecordingType = nil
+                HotkeyManager.shared.startListening()
+            }
         }
         .alert(t("Critical Warning"), isPresented: $isShowingSwitchToRamAlert) {
             Button(t("Proceed to RAM"), role: .destructive) {
@@ -409,6 +416,13 @@ struct GeneralSettingsView: View {
         VStack(alignment: .leading, spacing: 5) {
             Text(t(title))
                 .font(.system(size: 14, weight: .bold))
+            if activeRecordingType == type {
+                Text(type == .main
+                     ? t("Use a combination, or a key that types nothing such as F1 to F20 or an arrow key. Press Escape to cancel.")
+                     : t("Any single key works here, Escape included. It only acts while a recording is running. Click the field again to cancel."))
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
             HStack(spacing: 8) {
                 Button(action: {
                     if activeRecordingType == type {
@@ -936,59 +950,61 @@ struct GeneralSettingsView: View {
                     )
                 }
                 
-                Divider()
-                    .background(appColorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05))
+                if llmSettings.provider == .local {
+                    Divider()
+                        .background(appColorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.05))
                 
-                // LLM Engine Row
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text(t("LLM Model"))
-                            .font(.system(size: 14, weight: .semibold))
-                        Spacer()
-                        Button(action: {
-                            LLMManager.shared.releaseModel()
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "eject.fill")
-                                    .font(.system(size: 11))
-                                Text(t("Unload from RAM"))
-                                    .font(.system(size: 12, weight: .medium))
+                    // LLM Engine Row
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text(t("LLM Model"))
+                                .font(.system(size: 14, weight: .semibold))
+                            Spacer()
+                            Button(action: {
+                                LLMManager.shared.releaseModel()
+                            }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "eject.fill")
+                                        .font(.system(size: 11))
+                                    Text(t("Unload from RAM"))
+                                        .font(.system(size: 12, weight: .medium))
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 5)
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 5)
+                            .buttonStyle(.plain)
+                            .background(appColorScheme == .dark ? Color.white : Color.black)
+                            .foregroundColor(appColorScheme == .dark ? .black : .white)
+                            .cornerRadius(6)
+                            .disabled(!modelManager.isAssistantLoaded)
+                            .opacity(modelManager.isAssistantLoaded ? 1.0 : 0.5)
                         }
-                        .buttonStyle(.plain)
-                        .background(appColorScheme == .dark ? Color.white : Color.black)
-                        .foregroundColor(appColorScheme == .dark ? .black : .white)
-                        .cornerRadius(6)
-                        .disabled(!modelManager.isAssistantLoaded)
-                        .opacity(modelManager.isAssistantLoaded ? 1.0 : 0.5)
-                    }
                     
-                    HStack {
-                        Text(t("Auto-unload after inactivity:"))
-                            .font(.system(size: 13))
-                        Spacer()
-                        Picker("", selection: $llmUnloadTimeout) {
-                            Text(t("Never")).tag(0)
-                            Text(t("1 min")).tag(1)
-                            Text(t("2 min")).tag(2)
-                            Text(t("5 min")).tag(5)
-                            Text(t("10 min")).tag(10)
-                            Text(t("30 min")).tag(30)
+                        HStack {
+                            Text(t("Auto-unload after inactivity:"))
+                                .font(.system(size: 13))
+                            Spacer()
+                            Picker("", selection: $llmUnloadTimeout) {
+                                Text(t("Never")).tag(0)
+                                Text(t("1 min")).tag(1)
+                                Text(t("2 min")).tag(2)
+                                Text(t("5 min")).tag(5)
+                                Text(t("10 min")).tag(10)
+                                Text(t("30 min")).tag(30)
+                            }
+                            .pickerStyle(.menu)
+                            .frame(width: 150)
+                            .onChange(of: llmUnloadTimeout) { _, _ in
+                                LLMManager.shared.resetUnloadTimer()
+                            }
                         }
-                        .pickerStyle(.menu)
-                        .frame(width: 150)
-                        .onChange(of: llmUnloadTimeout) { _, _ in
-                            LLMManager.shared.resetUnloadTimer()
-                        }
-                    }
                     
-                    modelStatusView(
-                        isLoaded: modelManager.isAssistantLoaded,
-                        lastUsed: modelManager.lastAssistantUsageTime,
-                        initTime: modelManager.assistantInitializeTime
-                    )
+                        modelStatusView(
+                            isLoaded: modelManager.isAssistantLoaded,
+                            lastUsed: modelManager.lastAssistantUsageTime,
+                            initTime: modelManager.assistantInitializeTime
+                        )
+                    }
                 }
                 
                 Text(t("Models will be unloaded from memory after the specified time of inactivity to free up RAM/VRAM. Reloading models after an unload may take 1-2 seconds."))
@@ -1114,16 +1130,22 @@ struct GeneralSettingsView: View {
                     pressedModifiers.removeAll()
                     maxPressedModifiers.removeAll()
                     let keyCode = event.keyCode
-                    if keyCode == 53 {
+                    // Escape is the natural key to cancel a dictation, so it must be bindable.
+                    // It stays the way out of the recorder only for the start shortcut, where
+                    // it cannot be bound anyway. For the others, press the button again.
+                    if keyCode == 53 && recordingType == .main {
                         activeRecordingType = nil
                         HotkeyManager.shared.startListening() 
                         return nil 
                     }
                     let modifiers = event.modifierFlags
                     let hasModifiers = modifiers.contains(.command) || modifiers.contains(.shift) || modifiers.contains(.option) || modifiers.contains(.control)
-                    let functionKeyCodes: Set<UInt16> = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 123, 124, 125, 126]
-                    let isFunctionKey = functionKeyCodes.contains(keyCode)
-                    if !hasModifiers && !isFunctionKey {
+                    let isNonTypingKey = HotkeyManager.nonTypingKeyCodes.contains(Int(keyCode))
+                    // The start shortcut fires while another app has focus, so a bare character
+                    // key there would be swallowed system wide and could never be typed again.
+                    // The other shortcuts only act during a recording, so any key is safe.
+                    let allowsBareKey = recordingType != .main
+                    if !hasModifiers && !isNonTypingKey && !allowsBareKey {
                         return nil 
                     }
                     var carbonModifiers: UInt32 = 0

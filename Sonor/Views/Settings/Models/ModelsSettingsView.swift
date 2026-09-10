@@ -4,6 +4,7 @@ import Hub
 struct ModelsSettingsView: View {
     @ObservedObject var manager = ModelManager.shared
     @ObservedObject var transcriptionManager = TranscriptionManager.shared
+    @ObservedObject var llmSettings = LLMSettings.shared
     @Environment(\.colorScheme) var colorScheme
     @State private var showUninstallConfirmation = false
     @State private var modelToUninstall: ModelType? = nil
@@ -205,20 +206,38 @@ struct ModelsSettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Text(t("LLM Models"))
                         .font(.system(size: 18, weight: .semibold))
-                    
-                    ModelCard(
-                        title: "Gemma (Text Correction)",
-                        description: t("Required for advanced text rewriting and smart corrections. Approx. 3 GB."),
-                        state: manager.gemmaState,
-                        progressText: manager.activeGemmaDownloadText,
-                        onDownload: { manager.downloadGemma() },
-                        onPause: { manager.pauseGemmaDownload() },
-                        onCancel: { manager.cancelGemmaDownload() },
-                        onUninstall: {
-                            self.modelToUninstall = .gemma
-                            self.showUninstallConfirmation = true
+
+                    HStack {
+                        Text(t("Run text rewriting on:"))
+                            .font(.system(size: 13))
+                        Spacer()
+                        Picker("", selection: $llmSettings.provider) {
+                            ForEach(LLMProvider.allCases) { provider in
+                                Text(provider.title).tag(provider)
+                            }
                         }
-                    )
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 260)
+                    }
+
+                    if llmSettings.provider == .local {
+                        ModelCard(
+                            title: "Gemma (Text Correction)",
+                            description: t("Required for advanced text rewriting and smart corrections. Approx. 3 GB."),
+                            state: manager.gemmaState,
+                            progressText: manager.activeGemmaDownloadText,
+                            onDownload: { manager.downloadGemma() },
+                            onPause: { manager.pauseGemmaDownload() },
+                            onCancel: { manager.cancelGemmaDownload() },
+                            onUninstall: {
+                                self.modelToUninstall = .gemma
+                                self.showUninstallConfirmation = true
+                            }
+                        )
+                    } else {
+                        LLMAPICard()
+                    }
                 }
                 
 

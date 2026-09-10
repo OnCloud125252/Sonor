@@ -27,16 +27,77 @@ final class LLMManager: ObservableObject {
     private var modelContainer: ModelContainer?
     private(set) var isReady = false
     @Published public var isLoaded: Bool = false
+    /// Last failure of the cloud API, shown in the model settings.
+    @Published public var lastAPIError: String?
     private var unloadTimer: Timer?
 
     private init() {}
 
+    private var provider: LLMProvider { LLMSettings.shared.provider }
 
+    /// The effective choice for one assistant. Pass nil for the global default.
+    func resolved(for mode: VoiceMode?) -> ResolvedLLM {
+        LLMSettings.shared.resolved(for: mode)
+    }
 
-    func cleanStream(text: String, systemPrompt: String, onToken: @escaping (String) -> Bool) async -> String {
+    /// True when the assistant can refine text right now.
+    func isAvailable(for mode: VoiceMode?) -> Bool {
+        resolved(for: mode).isUsable
+    }
+
+    /// True when the active provider can refine text right now.
+    var isAvailable: Bool {
+        isAvailable(for: nil)
+    }
+
+    /// True when the on-device model must load before the first token.
+    func needsWarmup(for mode: VoiceMode?) -> Bool {
+        resolved(for: mode).provider == .local && !(isReady && modelContainer != nil)
+    }
+
+    var needsWarmup: Bool {
+        needsWarmup(for: nil)
+    }
+
+    /// Name written into the message history.
+    func activeModelLabel(for mode: VoiceMode?) -> String {
+        resolved(for: mode).label
+    }
+
+    var activeModelLabel: String {
+        activeModelLabel(for: nil)
+    }
+
+    func cleanStream(text: String, systemPrompt: String, mode: VoiceMode? = nil, onToken: @escaping (String) -> Bool) async -> String {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return text }
         if systemPrompt.isEmpty { return text }
 
+        let selection = resolved(for: mode)
+        switch selection.provider {
+        case .local:
+            return await cleanStreamLocal(text: text, systemPrompt: systemPrompt, onToken: onToken)
+        case .remoteAPI:
+            return await cleanStreamRemote(configuration: selection.configuration, text: text, systemPrompt: systemPrompt, onToken: onToken)
+        }
+    }
+
+    private func cleanStreamRemote(configuration: RemoteLLMConfiguration, text: String, systemPrompt: String, onToken: @escaping (String) -> Bool) async -> String {
+        let service = RemoteLLMService(configuration: configuration)
+        ModelManager.shared.lastAssistantUsageTime = Date()
+        do {
+            let result = try await service.streamChat(systemPrompt: systemPrompt, userText: text) { token in
+                if Task.isCancelled { return false }
+                return onToken(token)
+            }
+            lastAPIError = nil
+            return result
+        } catch {
+            lastAPIError = error.localizedDescription
+            return text
+        }
+    }
+
+    private func cleanStreamLocal(text: String, systemPrompt: String, onToken: @escaping (String) -> Bool) async -> String {
         let prompt = "\(systemPrompt)\n\nTekst: \(text)"
         var fullText = ""
 
@@ -62,8 +123,8 @@ final class LLMManager: ObservableObject {
         }
     }
 
-    func ensureModelWarmed() async {
-        if isReady { return }
+    func ensureModelWarmed(for mode: VoiceMode? = nil) async {
+        guard needsWarmup(for: mode) else { return }
         do {
             let session = try await getSession()
             ModelManager.shared.lastAssistantUsageTime = Date()
@@ -91,6 +152,7 @@ final class LLMManager: ObservableObject {
 
     public func resetUnloadTimer() {
         unloadTimer?.invalidate()
+        guard provider == .local else { return }
         let timeout = UserDefaults.standard.integer(forKey: "llmUnloadTimeout")
         guard timeout > 0 else { return }
         

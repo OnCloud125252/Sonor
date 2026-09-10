@@ -3,12 +3,65 @@ import AppKit
 import UniformTypeIdentifiers
 import ScreenCaptureKit
 
+/// Coalesces mode writes. Saving on every keystroke forced a blocking UserDefaults flush and
+/// made every listener reload and re-decode the whole mode list.
+@MainActor
+final class ModeSaver {
+    static let shared = ModeSaver()
+    private var pendingSave: DispatchWorkItem?
+    private init() {}
+
+    func save(_ modes: [VoiceMode]) {
+        pendingSave?.cancel()
+        let item = DispatchWorkItem { ModeSaver.write(modes) }
+        pendingSave = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: item)
+    }
+
+    /// Used for structural edits, where listeners must see the change at once.
+    func saveNow(_ modes: [VoiceMode]) {
+        pendingSave?.cancel()
+        pendingSave = nil
+        ModeSaver.write(modes)
+    }
+
+    func flush(_ modes: [VoiceMode]) {
+        guard pendingSave != nil else { return }
+        saveNow(modes)
+    }
+
+    private static func write(_ modes: [VoiceMode]) {
+        guard let data = try? JSONEncoder().encode(modes) else { return }
+        UserDefaults.standard.set(data, forKey: "voiceModes")
+        NotificationCenter.default.post(name: Notification.Name("VoiceModesUpdated"), object: nil)
+    }
+}
+
+/// Application icons never change while the app runs, and the lookup goes through
+/// LaunchServices, so each bundle identifier is resolved once.
+@MainActor
+final class AppIconCache {
+    static let shared = AppIconCache()
+    private var icons: [String: NSImage?] = [:]
+    private init() {}
+
+    func icon(forBundleID bundleID: String) -> NSImage? {
+        if let cached = icons[bundleID] { return cached }
+        let resolved = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+            .map { NSWorkspace.shared.icon(forFile: $0.path) }
+        icons[bundleID] = resolved
+        return resolved
+    }
+}
+
 struct ModeEditorView: View {
     @Environment(\.colorScheme) var colorScheme
     @Binding var modes: [VoiceMode]
     @Binding var selectedModeID: String
     
     @State private var showDeleteConfirmation = false
+    /// Mirrors the stored default so the star reacts immediately.
+    @State private var defaultModeID: String = UserDefaults.standard.string(forKey: VoiceMode.defaultModeIDKey) ?? ""
     @State private var showActiveModeDeleteAlert = false
     @State private var showConflictAlert = false
     @State private var conflictingBundleID: String? = nil
@@ -17,6 +70,8 @@ struct ModeEditorView: View {
     @State private var showRenameSheet = false
     @State private var newAssistantName = ""
     @ObservedObject private var modelManager = ModelManager.shared
+    /// The cloud model field and the warning follow the global endpoint settings.
+    @ObservedObject private var llmSettings = LLMSettings.shared
     
     var downloadedModels: [(id: String, name: String)] {
         var list: [(id: String, name: String)] = []
@@ -36,10 +91,18 @@ struct ModeEditorView: View {
     
     var body: some View {
         if let index = modes.firstIndex(where: { $0.id.uuidString == selectedModeID }) {
+            let editedModeID = modes[index].id
+            // Looked up by id on every access. Capturing the index froze it at body time, so a
+            // delete followed by a pending text commit indexed past the end of the array.
             let modeBinding = Binding<VoiceMode>(
-                get: { modes[index] },
-                set: { 
-                    modes[index] = $0
+                get: {
+                    modes.first(where: { $0.id == editedModeID })
+                        ?? modes.first
+                        ?? VoiceMode(name: "", prompt: "")
+                },
+                set: { updated in
+                    guard let current = modes.firstIndex(where: { $0.id == editedModeID }) else { return }
+                    modes[current] = updated
                     saveModes()
                 }
             )
@@ -53,6 +116,7 @@ struct ModeEditorView: View {
                             .font(.system(size: 18, weight: .bold))
                     }
                     Spacer()
+                    assistantStateControls(modeBinding: modeBinding)
                 }
                 .alert(isPresented: $showDeleteConfirmation) {
                     Alert(
@@ -174,11 +238,123 @@ struct ModeEditorView: View {
     }
     
     
+    /// Every keystroke in the prompt editor runs through the mode binding. Encoding, forcing a
+    /// blocking `synchronize()` and broadcasting an app-wide reload per character made typing
+    /// stutter, so writes are coalesced.
     private func saveModes() {
-        if let data = try? JSONEncoder().encode(modes) {
-            UserDefaults.standard.set(data, forKey: "voiceModes")
-            UserDefaults.standard.synchronize()
-            NotificationCenter.default.post(name: Notification.Name("VoiceModesUpdated"), object: nil)
+        ModeSaver.shared.save(modes)
+    }
+
+    /// Writes out an edit that is still waiting in the debounce window.
+    private func flushPendingSave() {
+        ModeSaver.shared.flush(modes)
+    }
+
+    @ViewBuilder
+    private func assistantStateControls(modeBinding: Binding<VoiceMode>) -> some View {
+        let mode = modeBinding.wrappedValue
+        let isDefault = defaultModeID == mode.id.uuidString
+        let enabledCount = VoiceMode.active(in: modes).count
+
+        HStack(spacing: 8) {
+            Button(action: { makeDefault(mode) }) {
+                HStack(spacing: 4) {
+                    Image(systemName: isDefault ? "star.fill" : "star")
+                    Text(isDefault ? t("Default assistant") : t("Use as default"))
+                }
+                .font(.system(size: 11, weight: .medium))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(isDefault ? 0.16 : 0.07)))
+            }
+            .buttonStyle(.plain)
+            .disabled(isDefault || !mode.isActive)
+
+            Toggle(isOn: Binding(
+                get: { mode.isActive },
+                set: { newValue in
+                    // Recording needs somewhere to go, so the last enabled assistant stays on.
+                    if !newValue && enabledCount <= 1 { return }
+                    modeBinding.wrappedValue.isEnabled = newValue
+                    if !newValue && isDefault, let replacement = VoiceMode.active(in: modes).first {
+                        VoiceMode.setDefaultModeID(replacement.id)
+                        defaultModeID = replacement.id.uuidString
+                    }
+                    ModeSaver.shared.saveNow(modes)
+                }
+            )) {
+                Text(t("Enabled"))
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .disabled(mode.isActive && enabledCount <= 1)
+            .help(mode.isActive && enabledCount <= 1 ? t("At least one assistant must stay enabled.") : "")
+        }
+    }
+
+    private func makeDefault(_ mode: VoiceMode) {
+        guard mode.isActive else { return }
+        VoiceMode.setDefaultModeID(mode.id)
+        defaultModeID = mode.id.uuidString
+        NotificationCenter.default.post(name: Notification.Name("VoiceModesUpdated"), object: nil)
+    }
+
+    /// Language model choice for this assistant only.
+    /// The endpoint and the API key stay global, because they belong to one account.
+    @ViewBuilder
+    private func llmSection(modeBinding: Binding<VoiceMode>) -> some View {
+        // A prompt is what sends text to a language model, so a plain assistant has no use for this.
+        if !modeBinding.wrappedValue.prompt.isEmpty {
+            let providerTag = modeBinding.wrappedValue.llmProviderOverride ?? "follow"
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text(t("Language Model"))
+                        .font(.system(size: 12))
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { providerTag },
+                        set: {
+                            modeBinding.wrappedValue.llmProviderOverride = ($0 == "follow") ? nil : $0
+                            saveModes()
+                        }
+                    )) {
+                        Text(t("Follow global setting")).tag("follow")
+                        Text(LLMProvider.local.title).tag(LLMProvider.local.rawValue)
+                        Text(LLMProvider.remoteAPI.title).tag(LLMProvider.remoteAPI.rawValue)
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 150)
+                }
+
+                if LLMSettings.shared.resolved(for: modeBinding.wrappedValue).provider == .remoteAPI {
+                    HStack {
+                        Text(t("Cloud model"))
+                            .font(.system(size: 12))
+                        Spacer()
+                        TextField(LLMSettings.shared.modelName, text: Binding(
+                            get: { modeBinding.wrappedValue.llmModelOverride ?? "" },
+                            set: {
+                                let trimmed = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                                modeBinding.wrappedValue.llmModelOverride = trimmed.isEmpty ? nil : $0
+                                saveModes()
+                            }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12))
+                        .frame(width: 150)
+                    }
+                    Text(t("Leave empty to use the model from the global API settings."))
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+
+                    if !LLMSettings.shared.resolved(for: modeBinding.wrappedValue).isUsable {
+                        Label(t("Set the API endpoint and key in Models settings first."), systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
         }
     }
 
@@ -242,17 +418,17 @@ struct ModeEditorView: View {
             saveModes()
         }
     }
+    /// Cached because this runs inside `body`, so an uncached lookup hit LaunchServices for
+    /// every bound app on every keystroke.
     private func getAppIcon(bundleID: String) -> NSImage? {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-            return NSWorkspace.shared.icon(forFile: url.path)
-        }
-        return nil
+        AppIconCache.shared.icon(forBundleID: bundleID)
     }
     private func deleteCurrentMode() {
         let activeModeID = UserDefaults.standard.string(forKey: "activeModeID") ?? ""
         let isDeletingActive = selectedModeID == activeModeID
         modes.removeAll(where: { $0.id.uuidString == selectedModeID })
-        saveModes()
+        // Structural change: listeners must not keep a deleted mode selected.
+        ModeSaver.shared.saveNow(modes)
         selectedModeID = modes.first?.id.uuidString ?? ""
         if isDeletingActive {
             UserDefaults.standard.set(selectedModeID, forKey: "activeModeID")
@@ -407,6 +583,7 @@ struct ModeEditorView: View {
                             .pickerStyle(.menu)
                             .frame(width: 150)
                         }
+                        llmSection(modeBinding: modeBinding)
                         VStack(alignment: .leading, spacing: 8) {
                             if modeBinding.wrappedValue.isBuiltInMode {
                                 Text(t("Built-in Assistant Description"))
@@ -701,6 +878,11 @@ struct ModeEditorView: View {
                         }
                         .buttonStyle(.plain)
                     }
+                }
+                .onDisappear {
+                    // Writes are coalesced, so a still-pending edit must land before the
+                    // editor goes away.
+                    flushPendingSave()
                 }
     }
 }

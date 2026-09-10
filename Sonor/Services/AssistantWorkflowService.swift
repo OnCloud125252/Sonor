@@ -103,9 +103,9 @@ class AssistantWorkflowService {
             recognizer.processString(correctedText)
             let detectedLang = recognizer.dominantLanguage?.rawValue
             
-            if !LLMManager.shared.isReady {
+            if LLMManager.shared.needsWarmup(for: selectedMode) {
                 onStatusChange("Initializing LLM Model...")
-                await LLMManager.shared.ensureModelWarmed()
+                await LLMManager.shared.ensureModelWarmed(for: selectedMode)
             }
             
             if Task.isCancelled { return }
@@ -156,7 +156,7 @@ class AssistantWorkflowService {
             var streamedText = ""
             let initialWillPaste = willPaste
             
-            _ = await LLMManager.shared.cleanStream(text: correctedText, systemPrompt: systemPrompt) { token in
+            let llmResult = await LLMManager.shared.cleanStream(text: correctedText, systemPrompt: systemPrompt, mode: selectedMode) { token in
                 fullGeneratedText += token
                 if !didStartStreaming {
                     didStartStreaming = true
@@ -194,6 +194,11 @@ class AssistantWorkflowService {
             }
             isGenerating = false
             if Task.isCancelled { return }
+
+            // The model produced nothing, for example when the API call failed. Keep the transcript.
+            if fullGeneratedText.isEmpty {
+                fullGeneratedText = llmResult
+            }
             
             let finalPID = frontmostPID
             let finalFocused = isBackgroundRetry ? false : PasteManager.shared.isTextFieldFocused(pid: finalPID)
@@ -254,13 +259,13 @@ class AssistantWorkflowService {
             if let historyMessageID = historyMessageID {
                 let appName: String? = isBackgroundRetry ? nil : (actuallyPasted ? (NSRunningApplication(processIdentifier: finalPID)?.localizedName ?? "Unknown App") : (willFallback ? LocalizationManager.shared.translate("Clipboard") : LocalizationManager.shared.translate("None")))
                 let whisperModel = TranscriptionManager.shared.activeModelName
-                let gemmaModel = "Gemma 3"
-                MessageMemoryManager.shared.updateMessage(id: historyMessageID, newText: fullGeneratedText, isError: false, appName: appName, transcriptionModel: whisperModel, llmModel: gemmaModel, modeName: selectedMode.name, updateMetadata: true)
+                let llmModel = LLMManager.shared.activeModelLabel(for: selectedMode)
+                MessageMemoryManager.shared.updateMessage(id: historyMessageID, newText: fullGeneratedText, isError: false, appName: appName, transcriptionModel: whisperModel, llmModel: llmModel, modeName: selectedMode.name, updateMetadata: true)
             } else {
                 let appName = actuallyPasted ? (NSRunningApplication(processIdentifier: finalPID)?.localizedName ?? "Unknown App") : (willFallback ? LocalizationManager.shared.translate("Clipboard") : LocalizationManager.shared.translate("None"))
                 let whisperModel = TranscriptionManager.shared.activeModelName
-                let gemmaModel = "Gemma 3"
-                MessageMemoryManager.shared.saveMessage(fullGeneratedText, samples: audioSamples, appName: appName, transcriptionModel: whisperModel, llmModel: gemmaModel, modeName: selectedMode.name)
+                let llmModel = LLMManager.shared.activeModelLabel(for: selectedMode)
+                MessageMemoryManager.shared.saveMessage(fullGeneratedText, samples: audioSamples, appName: appName, transcriptionModel: whisperModel, llmModel: llmModel, modeName: selectedMode.name)
             }
             if finalFocused || initialWillPaste {
                 await MainActor.run {
