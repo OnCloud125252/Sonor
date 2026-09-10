@@ -141,6 +141,12 @@ struct OnboardingView: View {
         .background(colorScheme == .dark ? Color.black : Color.white)
         .onDisappear {
             removeEventMonitor()
+            // Recording a shortcut stops the global tap. Leaving this screen mid-capture used
+            // to keep the hotkey dead until the app was restarted.
+            if isRecordingHotkey {
+                isRecordingHotkey = false
+                HotkeyManager.shared.startListening()
+            }
         }
     }
     @ViewBuilder
@@ -469,9 +475,11 @@ struct OnboardingView: View {
                     }
                     let modifiers = event.modifierFlags
                     let hasModifiers = modifiers.contains(.command) || modifiers.contains(.shift) || modifiers.contains(.option) || modifiers.contains(.control)
-                    let functionKeyCodes: Set<UInt16> = [53, 122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 123, 124, 125, 126, 49]
-                    let isFunctionKey = functionKeyCodes.contains(keyCode)
-                    if !hasModifiers && !isFunctionKey {
+                    // This screen records the start shortcut, which fires while another app has
+                    // focus. Space used to be accepted here, which would have swallowed every
+                    // space press in the system.
+                    let isNonTypingKey = HotkeyManager.nonTypingKeyCodes.contains(Int(keyCode))
+                    if !hasModifiers && !isNonTypingKey {
                         return event
                     }
                     var carbonModifiers: UInt32 = 0

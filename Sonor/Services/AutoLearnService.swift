@@ -7,12 +7,21 @@ class AutoLearnService {
     
     private init() {}
     
-    func getFocusedElementText(pid: pid_t) -> String? {
+    /// Reads the focused field of another application.
+    ///
+    /// This is synchronous cross-process Accessibility traffic that stalls until the target
+    /// app answers, so it must not run on the main actor. Auto-learn polls it four times over
+    /// ten seconds after every dictation, and a busy target app froze the UI each time.
+    nonisolated func getFocusedElementText(pid: pid_t) -> String? {
         guard AXIsProcessTrusted() else { return nil }
         let appElement = AXUIElementCreateApplication(pid)
         var focusedElement: AnyObject?
         let focusResult = AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
-        guard focusResult == .success, let element = focusedElement else { return nil }
+        // The Accessibility API hands back an untyped CFTypeRef. A forced cast traps when an
+        // app returns anything other than an AXUIElement.
+        guard focusResult == .success,
+              let element = focusedElement,
+              CFGetTypeID(element) == AXUIElementGetTypeID() else { return nil }
         let axElement = element as! AXUIElement
         var currentValue: AnyObject?
         let valueResult = AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &currentValue)
@@ -24,7 +33,7 @@ class AutoLearnService {
         guard UserDefaults.standard.bool(forKey: "autoLearnDictionary") else { return }
         Task {
             try? await Task.sleep(nanoseconds: 1_000_000_000) 
-            guard let initialText = await MainActor.run(body: { self.getFocusedElementText(pid: targetPID) }),
+            guard let initialText = await Self.readFocusedText(pid: targetPID),
                   !initialText.isEmpty else {
                 return
             }
@@ -33,7 +42,7 @@ class AutoLearnService {
             
             for _ in 1...3 {
                 try? await Task.sleep(nanoseconds: 3_000_000_000) 
-                guard let currentText = await MainActor.run(body: { self.getFocusedElementText(pid: targetPID) }) else {
+                guard let currentText = await Self.readFocusedText(pid: targetPID) else {
                     continue
                 }
                 if currentText != lastText {
@@ -52,6 +61,12 @@ class AutoLearnService {
         }
     }
     
+    private nonisolated static func readFocusedText(pid: pid_t) async -> String? {
+        await Task.detached(priority: .utility) {
+            AutoLearnService.shared.getFocusedElementText(pid: pid)
+        }.value
+    }
+
     func addDictionaryEntries(corrections: [(wrong: String, correct: String)], currentNotification: DictionaryNotification?) -> DictionaryNotification? {
         var newLearnedEntries: [LearnedEntry] = []
         var dictionary = UserDefaults.standard.dictionary(forKey: "dictionaryEntries") as? [String: String] ?? [:]

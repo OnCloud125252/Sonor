@@ -148,6 +148,18 @@ final class MLXEngine: TranscriptionEngine {
         // MLXAudioSTT models usually have a generate function taking audio data. 
         // Some also take language or prompts depending on the model struct.
         
+        // The unload timer can fire while this runs. Capturing the model here keeps it alive
+        // for the whole transcription instead of letting `unload()` release it mid-flight.
+        let senseVoice = senseVoiceModel
+        let moonshine = moonshineModel
+        let parakeet = parakeetModel
+        let qwen3ASR = qwen3ASRModel
+        let canary = canaryModel
+        let nemotron = nemotronModel
+        let granite = graniteModel
+        let fireRed = fireRedModel
+        let cohere = cohereModel
+
         return await Task.detached {
             defer {
                 MLX.Memory.clearCache()
@@ -155,31 +167,31 @@ final class MLXEngine: TranscriptionEngine {
             let mlxAudio = MLXArray(audioSamples)
             eval(mlxAudio)
             
-            if let model = self.senseVoiceModel {
+            if let model = senseVoice {
                 let output = model.generate(audio: mlxAudio)
                 return output.text
-            } else if let model = self.moonshineModel {
+            } else if let model = moonshine {
                 let output = model.generate(audio: mlxAudio)
                 return output.text
-            } else if let model = self.parakeetModel {
+            } else if let model = parakeet {
                 let output = model.generate(audio: mlxAudio)
                 return output.text
-            } else if let model = self.qwen3ASRModel {
+            } else if let model = qwen3ASR {
                 let output = model.generate(audio: mlxAudio, language: language)
                 return output.text
-            } else if let model = self.canaryModel {
+            } else if let model = canary {
                 let output = model.generate(audio: mlxAudio)
                 return output.text
-            } else if let model = self.nemotronModel {
+            } else if let model = nemotron {
                 let output = model.generate(audio: mlxAudio)
                 return output.text
-            } else if let model = self.graniteModel {
+            } else if let model = granite {
                 let output = model.generate(audio: mlxAudio)
                 return output.text
-            } else if let model = self.fireRedModel {
+            } else if let model = fireRed {
                 let output = model.generate(audio: mlxAudio)
                 return output.text
-            } else if let model = self.cohereModel {
+            } else if let model = cohere {
                 let output = model.generate(audio: mlxAudio)
                 return output.text
             }

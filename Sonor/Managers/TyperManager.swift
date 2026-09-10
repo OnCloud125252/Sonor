@@ -9,6 +9,13 @@ class PasteManager {
 
 
 
+    /// The Accessibility API returns an untyped CFTypeRef. A forced cast traps when an app
+    /// hands back anything other than an AXUIElement, so the type is checked at runtime.
+    private func asAXUIElement(_ value: AnyObject?) -> AXUIElement? {
+        guard let value = value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
     func getFocusedAXElement(pid: pid_t) -> AXUIElement? {
         guard AXIsProcessTrusted() else {
             return nil
@@ -16,14 +23,14 @@ class PasteManager {
         let appElement = AXUIElementCreateApplication(pid)
         var focusedElement: AnyObject?
         var focusResult = AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
-        if focusResult == .success, let element = focusedElement as! AXUIElement? {
+        if focusResult == .success, let element = asAXUIElement(focusedElement) {
             return element
         }
         var focusedWindow: AnyObject?
         if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
-           let windowElement = focusedWindow as! AXUIElement? {
+           let windowElement = asAXUIElement(focusedWindow) {
             focusResult = AXUIElementCopyAttributeValue(windowElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
-            if focusResult == .success, let element = focusedElement as! AXUIElement? {
+            if focusResult == .success, let element = asAXUIElement(focusedElement) {
                 return element
             }
         }
@@ -31,7 +38,7 @@ class PasteManager {
         if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowsList) == .success,
            let windows = windowsList as? [AXUIElement], let firstWindow = windows.first {
             focusResult = AXUIElementCopyAttributeValue(firstWindow, kAXFocusedUIElementAttribute as CFString, &focusedElement)
-            if focusResult == .success, let element = focusedElement as! AXUIElement? {
+            if focusResult == .success, let element = asAXUIElement(focusedElement) {
                 return element
             }
         }
@@ -98,70 +105,6 @@ class PasteManager {
         }
         return nil
     }
-
-
-    private func tryAXInsert(text: String, pid: pid_t) -> Bool {
-        guard AXIsProcessTrusted() else {
-            return false
-        }
-
-        let appElement = AXUIElementCreateApplication(pid)
-
-        var focusedElement: AnyObject?
-        let focusResult = AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
-
-        guard focusResult == .success else {
-            return false
-        }
-
-        guard let element = focusedElement else {
-            return false
-        }
-        let axElement = element as! AXUIElement
-
-        var settable: DarwinBoolean = false
-        AXUIElementIsAttributeSettable(axElement, kAXValueAttribute as CFString, &settable)
-
-        guard settable.boolValue else {
-            return false
-        }
-
-        var currentValue: AnyObject?
-        AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &currentValue)
-
-        var selectedRange: AnyObject?
-        AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &selectedRange)
-        if let rangeValue = selectedRange,
-           CFGetTypeID(rangeValue) == AXValueGetTypeID() {
-            let axValue = rangeValue as! AXValue
-            var range = CFRange()
-            AXValueGetValue(axValue, .cfRange, &range)
-
-            let currentStr = (currentValue as? String) ?? ""
-            let nsStr = currentStr as NSString
-            let safeLocation = max(0, min(range.location, nsStr.length))
-            let safeLength = max(0, min(range.length, nsStr.length - safeLocation))
-            let safeRange = NSRange(location: safeLocation, length: safeLength)
-
-            let newStr = nsStr.replacingCharacters(in: safeRange, with: text)
-
-            let setResult = AXUIElementSetAttributeValue(axElement, kAXValueAttribute as CFString, newStr as CFTypeRef)
-
-            if setResult == .success {
-                var newRange = CFRange(location: safeLocation + text.count, length: 0)
-                if let newRangeValue = AXValueCreate(.cfRange, &newRange) {
-                    AXUIElementSetAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, newRangeValue)
-                }
-                return true
-            } else {
-            }
-        }
-
-        let setResult = AXUIElementSetAttributeValue(axElement, kAXValueAttribute as CFString, text as CFTypeRef)
-        return setResult == .success
-    }
-
-
 
 
     func typeTextDirectly(text: String, targetPID: pid_t, forceFocusElement: AXUIElement? = nil) {

@@ -1,6 +1,72 @@
 import Foundation
 import AppKit
 import AVFoundation
+import os
+
+/// Owns one event tap and the thread that runs its run loop.
+///
+/// The previous code stored the tap, run loop and source as plain fields on the manager and
+/// started the thread without waiting. `startListening()` calls `stopListening()` first, so a
+/// thread that had not been scheduled yet would wake up and call `CGEvent.tapEnable` on a mach
+/// port that was already invalidated, which crashes with SIGSEGV inside SLEventTapEnable.
+/// Keeping the state per session, and waiting for the thread to come up and go down, makes the
+/// tap thread unable to outlive its own tap.
+private final class EventTapSession {
+    let tap: CFMachPort
+    private let readySignal = DispatchSemaphore(value: 0)
+    private let finishedSignal = DispatchSemaphore(value: 0)
+    private var runLoop: CFRunLoop?
+    private var runLoopSource: CFRunLoopSource?
+
+    init(tap: CFMachPort) {
+        self.tap = tap
+    }
+
+    func start() {
+        let thread = Thread { [self] in
+            let currentRunLoop = CFRunLoopGetCurrent()
+            let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+            runLoop = currentRunLoop
+            runLoopSource = source
+            if let source = source {
+                CFRunLoopAddSource(currentRunLoop, source, .defaultMode)
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            // Signalled only after the fields above are stored, so `stop()` always sees them.
+            readySignal.signal()
+            if source != nil {
+                CFRunLoopRun()
+            }
+            finishedSignal.signal()
+        }
+        thread.name = "SonorCGEventTapThread"
+        thread.start()
+        _ = readySignal.wait(timeout: .now() + 5.0)
+    }
+
+    func stop() {
+        if let runLoop = runLoop, let source = runLoopSource {
+            CFRunLoopRemoveSource(runLoop, source, .defaultMode)
+            CFRunLoopStop(runLoop)
+            _ = finishedSignal.wait(timeout: .now() + 5.0)
+        }
+        // Invalidated only once the thread has left its run loop, so nothing touches a dead port.
+        CGEvent.tapEnable(tap: tap, enable: false)
+        CFMachPortInvalidate(tap)
+    }
+}
+
+/// One immutable snapshot of every configured shortcut.
+/// Publishing the five shortcuts as separate fields let the tap thread read a half-updated set
+/// while the settings screen rewrote them.
+private struct HotkeyConfiguration {
+    let main: HotkeyManager.HotkeyDef
+    let cancel: HotkeyManager.HotkeyDef
+    let pause: HotkeyManager.HotkeyDef
+    let assistant: HotkeyManager.HotkeyDef
+    let paste: HotkeyManager.HotkeyDef
+    let mode: String
+}
 
 
 func eventTapCallback(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
@@ -16,8 +82,8 @@ class HotkeyManager {
     var onPauseKeyDown: (() -> Void)?
     var onAssistantKeyDown: (() -> Void)?
     var onPasteKeyDown: (() -> Void)?
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
+    private let session = OSAllocatedUnfairLock<EventTapSession?>(initialState: nil)
+    private let configuration = OSAllocatedUnfairLock<HotkeyConfiguration?>(initialState: nil)
     private var isKeyDown = false
     private var isCancelKeyDown = false
     private var isPauseKeyDown = false
@@ -25,16 +91,32 @@ class HotkeyManager {
     private var isPasteKeyDown = false
     private var activeIsHoldMode = false
     private var modifierOnlyHotkeyAborted = false
-    private var cachedMainHotkey: HotkeyDef?
-    private var cachedCancelHotkey: HotkeyDef?
-    private var cachedPauseHotkey: HotkeyDef?
-    private var cachedAssistantHotkey: HotkeyDef?
-    private var cachedPasteHotkey: HotkeyDef?
-    private var cachedHotkeyModeString: String = "Click"
     private var capturedKeys: Set<Int> = []
-    private var tapThread: Thread?
-    private var tapRunLoop: CFRunLoop?
     private var hasNotifiedMissingPermissions = false
+
+    /// The recorder only stores Command, Shift, Option and Control, so only those are compared.
+    /// Matching against every device-independent flag broke shortcuts that carry extra bits:
+    /// function keys and arrow keys always report `.function`, and Caps Lock reports
+    /// `.capsLock`, so an exact comparison could never succeed for them.
+    static let recognizedModifiers: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
+
+    /// Keys that never produce a character. Binding one of these on its own is safe at any
+    /// time, because swallowing it cannot stop the user from typing.
+    static let nonTypingKeyCodes: Set<Int> = [
+        122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111,  // F1 to F12
+        105, 107, 113, 106, 64, 79, 80, 90,                      // F13 to F20
+        123, 124, 125, 126,                                      // arrows
+        115, 116, 119, 121,                                      // home, page up, end, page down
+        114, 110, 63                                             // help, menu, fn
+    ]
+
+    /// A shortcut with no modifier that also types a character can only be safe while a
+    /// recording is running. Outside a recording the tap must let that key through.
+    private let recordingActive = OSAllocatedUnfairLock(initialState: false)
+
+    func setRecordingActive(_ active: Bool) {
+        recordingActive.withLock { $0 = active }
+    }
     
     private init() {
         self.checkPermissions()
@@ -59,19 +141,19 @@ class HotkeyManager {
     func checkPermissions() {
         let trusted = AXIsProcessTrusted()
         let hasMic = (AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)
-        let hasTap = self.eventTap != nil
+        let activeTap = session.withLock { $0?.tap }
         
         let allGranted = trusted && hasMic
         
         if allGranted {
             self.hasNotifiedMissingPermissions = false
-            if !hasTap {
+            if activeTap == nil {
                 self.startListening()
-            } else if let tap = self.eventTap, !CGEvent.tapIsEnabled(tap: tap) {
+            } else if let tap = activeTap, !CGEvent.tapIsEnabled(tap: tap) {
                 self.startListening()
             }
         } else {
-            if hasTap {
+            if activeTap != nil {
                 self.stopListening()
             }
             
@@ -98,12 +180,15 @@ class HotkeyManager {
             return
         }
         
-        self.cachedMainHotkey = HotkeyDef(keyCodeKey: "hotkeyCode", modifiersKey: "hotkeyModifiers", stringKey: "hotkeyString", defaultCode: 49, defaultModifiers: 0x1800)
-        self.cachedCancelHotkey = HotkeyDef(keyCodeKey: "hotkeyCode_cancel", modifiersKey: "hotkeyModifiers_cancel", stringKey: "hotkeyString_cancel", defaultCode: 6, defaultModifiers: 0x1800)
-        self.cachedPauseHotkey = HotkeyDef(keyCodeKey: "hotkeyCode_pause", modifiersKey: "hotkeyModifiers_pause", stringKey: "hotkeyString_pause", defaultCode: 7, defaultModifiers: 0x1800)
-        self.cachedAssistantHotkey = HotkeyDef(keyCodeKey: "hotkeyCode_assistant", modifiersKey: "hotkeyModifiers_assistant", stringKey: "hotkeyString_assistant", defaultCode: 8, defaultModifiers: 0x1800)
-        self.cachedPasteHotkey = HotkeyDef(keyCodeKey: "hotkeyCode_paste", modifiersKey: "hotkeyModifiers_paste", stringKey: "hotkeyString_paste", defaultCode: -1, defaultModifiers: 0)
-        self.cachedHotkeyModeString = UserDefaults.standard.string(forKey: "hotkeyMode") ?? "Click"
+        let snapshot = HotkeyConfiguration(
+            main: HotkeyDef(keyCodeKey: "hotkeyCode", modifiersKey: "hotkeyModifiers", stringKey: "hotkeyString", defaultCode: 49, defaultModifiers: 0x1800),
+            cancel: HotkeyDef(keyCodeKey: "hotkeyCode_cancel", modifiersKey: "hotkeyModifiers_cancel", stringKey: "hotkeyString_cancel", defaultCode: 6, defaultModifiers: 0x1800),
+            pause: HotkeyDef(keyCodeKey: "hotkeyCode_pause", modifiersKey: "hotkeyModifiers_pause", stringKey: "hotkeyString_pause", defaultCode: 7, defaultModifiers: 0x1800),
+            assistant: HotkeyDef(keyCodeKey: "hotkeyCode_assistant", modifiersKey: "hotkeyModifiers_assistant", stringKey: "hotkeyString_assistant", defaultCode: 8, defaultModifiers: 0x1800),
+            paste: HotkeyDef(keyCodeKey: "hotkeyCode_paste", modifiersKey: "hotkeyModifiers_paste", stringKey: "hotkeyString_paste", defaultCode: -1, defaultModifiers: 0),
+            mode: UserDefaults.standard.string(forKey: "hotkeyMode") ?? "Click"
+        )
+        configuration.withLock { $0 = snapshot }
         
         let eventMask = CGEventMask((1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue) | (1 << CGEventType.flagsChanged.rawValue))
         guard let tap = CGEvent.tapCreate(
@@ -116,47 +201,19 @@ class HotkeyManager {
         ) else {
             return
         }
-        self.eventTap = tap
-        
-        self.tapThread = Thread { [weak self] in
-            guard let self = self else { return }
-            self.tapRunLoop = CFRunLoopGetCurrent()
-            
-            self.runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-            if let source = self.runLoopSource {
-                CFRunLoopAddSource(self.tapRunLoop!, source, .defaultMode)
-                CGEvent.tapEnable(tap: tap, enable: true)
-                CFRunLoopRun()
-            }
-        }
-        self.tapThread?.name = "SonorCGEventTapThread"
-        self.tapThread?.start()
+
+        let newSession = EventTapSession(tap: tap)
+        session.withLock { $0 = newSession }
+        newSession.start()
     }
     
     func stopListening() {
-        if let tap = self.eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            CFMachPortInvalidate(tap)
+        let previous = session.withLock { current -> EventTapSession? in
+            let existing = current
+            current = nil
+            return existing
         }
-        
-        let runLoopToStop = self.tapRunLoop
-        let sourceToRemove = self.runLoopSource
-        
-        self.eventTap = nil
-        self.runLoopSource = nil
-        self.tapRunLoop = nil
-        
-        if let runLoop = runLoopToStop {
-            if let source = sourceToRemove {
-                CFRunLoopRemoveSource(runLoop, source, .defaultMode)
-            }
-            CFRunLoopStop(runLoop)
-        }
-        
-        if let thread = self.tapThread {
-            thread.cancel()
-        }
-        self.tapThread = nil
+        previous?.stop()
     }
     
     struct HotkeyDef {
@@ -189,25 +246,33 @@ class HotkeyManager {
     func handleEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let passthrough = Unmanaged.passUnretained(event)
         
+        // macOS disables a slow or interrupted tap and never re-enables it on its own.
+        // Without this the hotkey stays dead until the app is focused again.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = session.withLock({ $0?.tap }) {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
             return passthrough
         }
 
-        guard let nsEvent = NSEvent(cgEvent: event) else {
-            return passthrough
-        }
+        // Reading the fields straight off the CGEvent avoids bridging an NSEvent for every
+        // keystroke typed anywhere in the system, which this tap sees.
+        let eventKeyCode = Int(event.getIntegerValueField(.keyboardEventKeycode))
+        let eventModifiers = NSEvent.ModifierFlags(rawValue: UInt(event.flags.rawValue))
+            .intersection(HotkeyManager.recognizedModifiers)
         
-        guard let mainHotkey = self.cachedMainHotkey,
-              let cancelHotkey = self.cachedCancelHotkey,
-              let pauseHotkey = self.cachedPauseHotkey,
-              let assistantHotkey = self.cachedAssistantHotkey,
-              let pasteHotkey = self.cachedPasteHotkey else {
+        // One consistent snapshot per event, so a settings change cannot be seen half applied.
+        guard let config = configuration.withLock({ $0 }) else {
             return passthrough
         }
+        let mainHotkey = config.main
+        let cancelHotkey = config.cancel
+        let pauseHotkey = config.pause
+        let assistantHotkey = config.assistant
+        let pasteHotkey = config.paste
 
         if !self.isKeyDown {
-            let mode = self.cachedHotkeyModeString
-            self.activeIsHoldMode = (mode == "Hold" || mode == "Automatic")
+            self.activeIsHoldMode = (config.mode == "Hold" || config.mode == "Automatic")
         }
         let isHoldMode = self.activeIsHoldMode
         
@@ -232,10 +297,19 @@ class HotkeyManager {
             let extra = current.subtracting(target)
             return extra.isSubset(of: ignoredModifiers) && target.isSubset(of: current)
         }
+
+        let isRecording = self.recordingActive.withLock { $0 }
+        /// A bare character key is claimed only while a recording is running. Claiming it all
+        /// the time would swallow that character everywhere in the system.
+        func isArmed(_ hotkey: HotkeyDef) -> Bool {
+            if !hotkey.targetModifiers.isEmpty { return true }
+            if HotkeyManager.nonTypingKeyCodes.contains(hotkey.code) { return true }
+            return isRecording
+        }
         
         if type == .flagsChanged {
-            let code = Int(nsEvent.keyCode)
-            let modifiers = nsEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let code = eventKeyCode
+            let modifiers = eventModifiers
             
             var changedFlag: NSEvent.ModifierFlags?
             switch code {
@@ -439,7 +513,7 @@ class HotkeyManager {
         }
         
         if type == .keyDown {
-            let code = Int(nsEvent.keyCode)
+            let code = eventKeyCode
             
             if self.isKeyDown && mainHotkey.isOnlyModifier {
                 self.modifierOnlyHotkeyAborted = true
@@ -457,8 +531,8 @@ class HotkeyManager {
                 self.modifierOnlyHotkeyAborted = true
             }
             
-            let modifiers = nsEvent.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            if !mainHotkey.isOnlyModifier && code == mainHotkey.code && modifiers == mainHotkey.targetModifiers {
+            let modifiers = eventModifiers
+            if !mainHotkey.isOnlyModifier && code == mainHotkey.code && modifiers == mainHotkey.targetModifiers && isArmed(mainHotkey) {
                 if !isKeyDown {
                     isKeyDown = true
                     let eventTime = Date()
@@ -468,29 +542,29 @@ class HotkeyManager {
                 return nil
             }
             
-            if !cancelHotkey.isOnlyModifier && code == cancelHotkey.code && modifiersMatch(cancelHotkey.targetModifiers, current: modifiers) {
+            if !cancelHotkey.isOnlyModifier && code == cancelHotkey.code && modifiersMatch(cancelHotkey.targetModifiers, current: modifiers) && isArmed(cancelHotkey) {
                 DispatchQueue.main.async { self.onCancelKeyDown?() }
                 capturedKeys.insert(code)
                 return nil
             }
-            if !pauseHotkey.isOnlyModifier && code == pauseHotkey.code && modifiersMatch(pauseHotkey.targetModifiers, current: modifiers) {
+            if !pauseHotkey.isOnlyModifier && code == pauseHotkey.code && modifiersMatch(pauseHotkey.targetModifiers, current: modifiers) && isArmed(pauseHotkey) {
                 DispatchQueue.main.async { self.onPauseKeyDown?() }
                 capturedKeys.insert(code)
                 return nil
             }
-            if !assistantHotkey.isOnlyModifier && code == assistantHotkey.code && modifiersMatch(assistantHotkey.targetModifiers, current: modifiers) {
+            if !assistantHotkey.isOnlyModifier && code == assistantHotkey.code && modifiersMatch(assistantHotkey.targetModifiers, current: modifiers) && isArmed(assistantHotkey) {
                 DispatchQueue.main.async { self.onAssistantKeyDown?() }
                 capturedKeys.insert(code)
                 return nil
             }
-            if !pasteHotkey.isOnlyModifier && code == pasteHotkey.code && modifiersMatch(pasteHotkey.targetModifiers, current: modifiers) {
+            if !pasteHotkey.isOnlyModifier && code == pasteHotkey.code && modifiersMatch(pasteHotkey.targetModifiers, current: modifiers) && isArmed(pasteHotkey) {
                 DispatchQueue.main.async { self.onPasteKeyDown?() }
                 capturedKeys.insert(code)
                 return nil
             }
             return passthrough
         } else if type == .keyUp {
-            let code = Int(nsEvent.keyCode)
+            let code = eventKeyCode
             if capturedKeys.contains(code) {
                 capturedKeys.remove(code)
                 if !mainHotkey.isOnlyModifier && code == mainHotkey.code {

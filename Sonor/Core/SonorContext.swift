@@ -6,10 +6,9 @@ public class SonorContext: ObservableObject, @unchecked Sendable {
     @Published public var isTranscribing = false
     
     nonisolated public init(modelPath: String) {
-        let wrp = SonorWrapper(modelPath: modelPath)
-        Task { @MainActor in
-            self.wrapper = wrp
-        }
+        // Assigning through a Task left `wrapper` nil right after init returned, so the first
+        // transcription after a model load silently produced an empty result.
+        self.wrapper = SonorWrapper(modelPath: modelPath)
     }
     
     public func transcribe(audioSamples: [Float], language: String = "auto", initialPrompt: String? = nil) async -> String {

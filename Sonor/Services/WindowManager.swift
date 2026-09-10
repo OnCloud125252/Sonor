@@ -4,15 +4,34 @@ import SwiftUI
 import AVFoundation
 
 @MainActor
-class WindowManager {
+class WindowManager: NSObject, NSWindowDelegate {
     static let shared = WindowManager()
     
     var hudWindow: NSPanel?
     private var settingsWindow: NSWindow?
     private var supportWindow: NSWindow?
     private var permissionsWindow: NSWindow?
+    private var hidePermissionViewsObserver: NSObjectProtocol?
     
-    private init() {}
+    private override init() { super.init() }
+
+    /// Sonor keeps running in the menu bar, so a closed window must not end the process. The
+    /// accessory activation policy takes care of that. The window and its SwiftUI tree are
+    /// released here: a hidden dashboard kept about 30 MB and every timer inside its views
+    /// alive for the rest of the session.
+    nonisolated func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        MainActor.assumeIsolated {
+            if window === settingsWindow { settingsWindow = nil }
+            if window === supportWindow { supportWindow = nil }
+            if window === permissionsWindow { permissionsWindow = nil }
+            // AppKit still reports the closing window as visible here, so the policy is
+            // re-evaluated once the close has finished.
+            DispatchQueue.main.async { [weak self] in
+                self?.updateActivationPolicy()
+            }
+        }
+    }
     
     func showHUD(controller: AppController) {
         hideHUDWorkItem?.cancel()
@@ -122,6 +141,9 @@ class WindowManager {
             hideHUDWorkItem?.cancel()
             let workItem = DispatchWorkItem { [weak self] in
                 self?.hudWindow?.orderOut(nil)
+                // The hosting view stays alive while hidden, so the HUD must be told to stop
+                // its display-rate animations itself.
+                NotificationCenter.default.post(name: NSNotification.Name("HUDWindowDidHide"), object: nil)
             }
             hideHUDWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
@@ -146,6 +168,7 @@ class WindowManager {
             window.styleMask.insert(.fullSizeContentView)
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
+            NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
             if showSupportWindow && !hasShownSupportWindowThisSession {
@@ -176,11 +199,8 @@ class WindowManager {
         window.collectionBehavior.remove(.fullScreenPrimary)
         window.isMovableByWindowBackground = false
         self.settingsWindow = window
-        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.updateActivationPolicy()
-            }
-        }
+        window.delegate = self
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         if showSupportWindow && !hasShownSupportWindowThisSession {
@@ -191,6 +211,7 @@ class WindowManager {
     
     func openSupportWindow() {
         if let window = supportWindow {
+            NSApp.setActivationPolicy(.regular)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: false)
             return
@@ -215,13 +236,9 @@ class WindowManager {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         self.supportWindow = window
-        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.supportWindow = nil
-                self?.updateActivationPolicy()
-            }
-        }
+        window.delegate = self
         window.collectionBehavior = [.managed, .fullScreenPrimary, .participatesInCycle]
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: false)
         window.makeKeyAndOrderFront(nil)
     }
@@ -236,6 +253,7 @@ class WindowManager {
         self.supportWindow?.close()
         
         if let window = permissionsWindow {
+            NSApp.setActivationPolicy(.regular)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -261,32 +279,33 @@ class WindowManager {
         window.isMovableByWindowBackground = true
         
         self.permissionsWindow = window
+        window.delegate = self
         
-        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.permissionsWindow = nil
-                self?.updateActivationPolicy()
-            }
-        }
-        
-        NotificationCenter.default.addObserver(forName: Notification.Name("HidePermissionViews"), object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.permissionsWindow?.close()
-                self?.openSettings()
+        // The permissions window is rebuilt on each open. Registering again without this
+        // guard would stack one observer per open and reopen settings once per registration.
+        if hidePermissionViewsObserver == nil {
+            hidePermissionViewsObserver = NotificationCenter.default.addObserver(forName: Notification.Name("HidePermissionViews"), object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self = self, self.permissionsWindow?.isVisible == true else { return }
+                    self.permissionsWindow?.close()
+                    self.openSettings()
+                }
             }
         }
         window.collectionBehavior = [.managed, .fullScreenPrimary, .participatesInCycle]
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
     
+    /// Sonor shows a Dock icon only while one of its windows is on screen. As an accessory the
+    /// app also stops SwiftUI from quitting the process once the last window goes away.
     func updateActivationPolicy() {
         let isSettingsVisible = settingsWindow?.isVisible == true
         let isSupportVisible = supportWindow?.isVisible == true
         let isPermissionsVisible = permissionsWindow?.isVisible == true
-        if !isSettingsVisible && !isSupportVisible && !isPermissionsVisible {
-            NSApp.setActivationPolicy(.regular)
-        }
+        let anyWindowVisible = isSettingsVisible || isSupportVisible || isPermissionsVisible
+        NSApp.setActivationPolicy(anyWindowVisible ? .regular : .accessory)
     }
 }
 

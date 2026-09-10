@@ -3,6 +3,8 @@ import AVFoundation
 import Combine
 import CoreAudio
 import AudioToolbox
+import Accelerate
+import os
 
 struct AudioDevice: Identifiable, Hashable {
     let id: AudioDeviceID
@@ -25,8 +27,30 @@ class AudioManager: ObservableObject {
     private var accumulatedSamples: [Float] = []
     private let samplesQueue = DispatchQueue(label: "com.sonor.samplesQueue")
     private var isTapInstalled = false
-    var isPaused = false
     private let targetFormat: AVAudioFormat?
+
+    /// Audio-thread state. The render callback runs on a real-time thread, so every field it
+    /// shares with the main thread lives behind this lock instead of a plain stored property.
+    private let levelLock = OSAllocatedUnfairLock(initialState: LevelState())
+    private struct LevelState {
+        var isPaused = false
+        var level: Float = 0
+        var lastPublish: UInt64 = 0
+    }
+
+    /// Publishing `audioLevel` on every render callback costs a main-thread hop ~47x/sec.
+    /// The waveform samples at 20 Hz, so anything faster is wasted work.
+    private static let levelPublishInterval: UInt64 = 45_000_000
+
+    var isPaused: Bool {
+        get { levelLock.withLock { $0.isPaused } }
+        set { levelLock.withLock { $0.isPaused = newValue } }
+    }
+
+    /// Latest RMS level, safe to read from any thread.
+    var currentLevel: Float {
+        levelLock.withLock { $0.level }
+    }
     
     private init() {
         self.targetFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false)
@@ -153,7 +177,8 @@ class AudioManager: ObservableObject {
     /// - Parameter clearSamples: If true, previously recorded samples are discarded before starting.
     func startRecording(clearSamples: Bool = true) throws {
         if clearSamples {
-            accumulatedSamples.removeAll()
+            // Must run on samplesQueue: the audio tap appends to this same buffer.
+            samplesQueue.sync { accumulatedSamples.removeAll(keepingCapacity: true) }
         }
         
         // All engine work serialized on engineQueue to prevent races
@@ -303,6 +328,7 @@ class AudioManager: ObservableObject {
                 }
                 self.audioEngine?.stop()
                 
+                self.levelLock.withLock { $0.level = 0 }
                 DispatchQueue.main.async {
                     self.isRecording = false
                     self.audioLevel = 0.0
@@ -320,8 +346,12 @@ class AudioManager: ObservableObject {
     }
     /// Physically stops the audio engine to release the microphone lock and remove the yellow privacy dot.
     func pauseRecording() {
-        guard !isPaused else { return }
-        isPaused = true
+        let alreadyPaused = levelLock.withLock { state -> Bool in
+            if state.isPaused { return true }
+            state.isPaused = true
+            return false
+        }
+        guard !alreadyPaused else { return }
         
         engineQueue.sync { [self] in
             NotificationCenter.default.removeObserver(self, name: .AVAudioEngineConfigurationChange, object: audioEngine)
@@ -333,6 +363,7 @@ class AudioManager: ObservableObject {
             audioEngine = nil // Destroy to release mic (removes yellow privacy dot)
         }
         
+        levelLock.withLock { $0.level = 0 }
         DispatchQueue.main.async {
             self.audioLevel = 0.0
         }
@@ -340,26 +371,35 @@ class AudioManager: ObservableObject {
     
     /// Recreates the audio engine and resumes recording, keeping the previously accumulated samples.
     func resumeRecording() throws {
-        guard isPaused else { return }
-        isPaused = false
+        let wasPaused = levelLock.withLock { state -> Bool in
+            guard state.isPaused else { return false }
+            state.isPaused = false
+            return true
+        }
+        guard wasPaused else { return }
         try startRecording(clearSamples: false)
     }
 
     /// Receives raw buffers from the audio engine, calculates UI volume levels,
     /// and performs format conversion into `accumulatedSamples`.
     private func processAudio(buffer: AVAudioPCMBuffer) {
-        if isPaused { return }
+        if levelLock.withLock({ $0.isPaused }) { return }
         autoreleasepool {
-            if let channelData = buffer.floatChannelData?[0] {
-                let length = Int(buffer.frameLength)
-                var sum: Float = 0
-                for i in 0..<length {
-                    let sample = channelData[i]
-                    sum += sample * sample
+            let length = Int(buffer.frameLength)
+            if let channelData = buffer.floatChannelData?[0], length > 0 {
+                var rms: Float = 0
+                vDSP_rmsqv(channelData, 1, &rms, vDSP_Length(length))
+                let now = DispatchTime.now().uptimeNanoseconds
+                let shouldPublish = levelLock.withLock { state -> Bool in
+                    state.level = rms
+                    guard now &- state.lastPublish >= AudioManager.levelPublishInterval else { return false }
+                    state.lastPublish = now
+                    return true
                 }
-                let rms = sqrt(sum / Float(length))
-                DispatchQueue.main.async {
-                    self.audioLevel = rms
+                if shouldPublish {
+                    DispatchQueue.main.async {
+                        self.audioLevel = rms
+                    }
                 }
             }
             guard let converter = audioConverter, let targetFormat = targetFormat else { return }

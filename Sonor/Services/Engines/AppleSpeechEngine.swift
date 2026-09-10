@@ -1,6 +1,7 @@
 import Foundation
 import Speech
 import AVFoundation
+import os
 
 public class AppleSpeechEngine: TranscriptionEngine {
     public let name: String = "Apple Speech (System)"
@@ -66,16 +67,44 @@ public class AppleSpeechEngine: TranscriptionEngine {
             // and instantiate a new SFSpeechRecognizer(locale:) if needed.
         }
         
+        // SFSpeechRecognizer can report an error after a result, and it can stop without ever
+        // sending a final result. Both cases must resume the continuation exactly once.
+        let hasResumed = OSAllocatedUnfairLock(initialState: false)
         return try await withCheckedThrowingContinuation { continuation in
-            recognizer.recognitionTask(with: request) { result, error in
+            var task: SFSpeechRecognitionTask?
+            let finish: (Result<String, Error>) -> Void = { outcome in
+                let alreadyResumed = hasResumed.withLock { resumed -> Bool in
+                    if resumed { return true }
+                    resumed = true
+                    return false
+                }
+                guard !alreadyResumed else { return }
+                continuation.resume(with: outcome)
+            }
+
+            task = recognizer.recognitionTask(with: request) { result, error in
                 if let error = error {
-                    continuation.resume(throwing: error)
+                    finish(.failure(error))
                     return
                 }
-                
-                if let result = result, result.isFinal {
-                    continuation.resume(returning: result.bestTranscription.formattedString)
+
+                guard let result = result else {
+                    finish(.failure(NSError(domain: "AppleSpeechEngine", code: 6, userInfo: [NSLocalizedDescriptionKey: "Speech recognition returned no result."])))
+                    return
                 }
+
+                if result.isFinal {
+                    finish(.success(result.bestTranscription.formattedString))
+                }
+            }
+
+            // Audio is appended up front and ended immediately, so recognition is bounded.
+            // This guards against a task that goes silent and never delivers a final result.
+            Task {
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                guard !hasResumed.withLock({ $0 }) else { return }
+                task?.cancel()
+                finish(.failure(NSError(domain: "AppleSpeechEngine", code: 7, userInfo: [NSLocalizedDescriptionKey: "Speech recognition timed out."])))
             }
         }
     }

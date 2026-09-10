@@ -4,20 +4,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleURLEvent(_:withReplyEvent:)), forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
     }
+
+    /// Sonor lives in the menu bar. Closing the dashboard must not end the process,
+    /// otherwise the hotkey stops working and the user has to relaunch the app.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        return false
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        NotificationCenter.default.post(name: NSNotification.Name("AppWillTerminate"), object: nil)
+        // ggml asserts in its Metal teardown if any GPU resource outlives the process.
+        // Releasing the engines here keeps `exit()` from aborting with SIGABRT.
+        MainActor.assumeIsolated {
+            TranscriptionManager.shared.resetEngine()
+            LLMManager.shared.releaseModel()
+        }
+    }
     @objc func handleURLEvent(_ event: NSAppleEventDescriptor, withReplyEvent replyEvent: NSAppleEventDescriptor) {
         // Deep link handling removed
     }
     
-    func applicationWillTerminate(_ notification: Notification) {
-        NotificationCenter.default.post(name: NSNotification.Name("AppWillTerminate"), object: nil)
     }
-}
 
 @main
 struct SonorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var controller = AppController()
     init() {
+        // The worker is spawned to survive an MLX out-of-memory abort, so it must stay
+        // minimal. Any UI-side warm-up done before this point would load a second copy of
+        // a transcription model, open the microphone and start MediaRemote inside the child.
+        if CommandLine.arguments.contains("--worker-mode") {
+            WorkerProcess.run()
+            // Should not reach here because WorkerProcess calls exit()
+        }
+
         // Zmuszamy MediaControlService do wcześniejszej inicjalizacji, 
         // aby adapter MediaRemote zdążył się połączyć i pobrać stan zanim użyjemy nagrywania pierwszy raz
         _ = MediaControlService.shared
@@ -26,17 +47,17 @@ struct SonorApp: App {
         // so first recording starts nearly instantly (especially with Bluetooth headphones)
         AudioManager.shared.prepareEngine()
         
-        // Pre-warm transcription engine to avoid CPU spike on first use
-        Task {
+        // Pre-warm transcription engine to avoid CPU spike on first use. The unload timer is
+        // armed right after, so the warm model does not sit in memory forever when the user
+        // never dictates. Before, only a finished recording started that countdown.
+        Task { @MainActor in
             try? await TranscriptionManager.shared.ensureEngineReady()
+            TranscriptionManager.shared.resetUnloadTimer()
         }
         
-        if CommandLine.arguments.contains("--worker-mode") {
-            WorkerProcess.run()
-            // Should not reach here because WorkerProcess calls exit()
-        }
-        
-        NSApplication.shared.setActivationPolicy(.regular)
+        // Starts as an accessory: Sonor launches straight into the menu bar with no window.
+        // WindowManager switches to .regular while a window is on screen.
+        NSApplication.shared.setActivationPolicy(.accessory)
         let mainMenu = NSMenu()
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)

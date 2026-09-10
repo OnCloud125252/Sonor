@@ -75,7 +75,10 @@ class SoundPlayer: NSObject {
                     
                     playerNode.play()
                     
-                    semaphore.wait()
+                    // The completion handler never fires if the output device disappears.
+                    // Without a deadline this serial queue would block every later sound.
+                    let bufferSeconds = Double(buffer.frameLength) / buffer.format.sampleRate
+                    _ = semaphore.wait(timeout: .now() + bufferSeconds + 2.0)
                     usleep(50_000)
                     
                     playerNode.stop()

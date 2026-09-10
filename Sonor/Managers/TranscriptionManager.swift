@@ -16,6 +16,12 @@ public class TranscriptionManager: ObservableObject {
     @Published public var currentEngineType: EngineType = .whisper
     @Published public var isLoaded: Bool = false
     private var unloadTimer: Timer?
+    /// Callers race to warm the engine (hotkey press, mode change, app launch). Without a
+    /// shared task each caller loads its own multi-GB model copy and the app runs out of memory.
+    private var loadTask: Task<Void, Error>?
+    /// Bumped whenever a load starts or the engine is reset, so a stale load cannot clear the
+    /// task handle belonging to a newer one.
+    private var loadGeneration = 0
     public var modelOverrideId: String? = nil
     
     public var activeModelName: String {
@@ -64,6 +70,9 @@ public class TranscriptionManager: ObservableObject {
     
     public func resetEngine() {
         // Stop current operations and free resources
+        loadGeneration += 1
+        loadTask?.cancel()
+        loadTask = nil
         activeEngine?.unload()
         activeEngine = nil
         isLoaded = false
@@ -90,9 +99,26 @@ public class TranscriptionManager: ObservableObject {
     }
     
     public func ensureEngineReady() async throws {
-        if activeEngine != nil && activeEngine!.isReady {
+        if let engine = activeEngine, engine.isReady {
             return
         }
+        if let existing = loadTask {
+            return try await existing.value
+        }
+        loadGeneration += 1
+        let generation = loadGeneration
+        let task = Task { try await self.loadEngine() }
+        loadTask = task
+        do {
+            try await task.value
+        } catch {
+            if loadGeneration == generation { loadTask = nil }
+            throw error
+        }
+        if loadGeneration == generation { loadTask = nil }
+    }
+
+    private func loadEngine() async throws {
         let startTime = CFAbsoluteTimeGetCurrent()
         
         let targetEngineType: EngineType
