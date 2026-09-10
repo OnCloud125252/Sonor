@@ -15,6 +15,9 @@ class HistoryAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
     
     private override init() {
         super.init()
+        // Clears the playback file left behind by earlier versions.
+        let staleTempFile = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("temp_playback.wav")
+        try? FileManager.default.removeItem(at: staleTempFile)
     }
     
     func play(id: UUID, data: Data) {
@@ -37,10 +40,9 @@ class HistoryAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
         isPaused = false
         
         do {
-            let tempURL = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("temp_playback.wav")
-            try data.write(to: tempURL)
-            
-            player = try AVAudioPlayer(contentsOf: tempURL)
+            // Played straight from memory. Writing the clip to a temp file left the user's
+            // recording on disk after playback, which also survived a RAM-only history.
+            player = try AVAudioPlayer(data: data)
             player?.delegate = self
             
             let defaults = UserDefaults.standard
