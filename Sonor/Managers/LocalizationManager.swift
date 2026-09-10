@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import os
 
 public class LocalizationManager: ObservableObject {
     public static let shared = LocalizationManager()
@@ -7,7 +8,28 @@ public class LocalizationManager: ObservableObject {
         willSet {
             objectWillChange.send()
         }
+        didSet {
+            refreshLanguageIndex()
+        }
     }
+
+    /// `translate` runs on every view body and from background work, 550 call sites in total.
+    /// Resolving the language through `@AppStorage` meant one UserDefaults lookup per call.
+    private let cachedLanguageIndex = OSAllocatedUnfairLock(initialState: 0)
+
+    private func refreshLanguageIndex() {
+        let stored = UserDefaults.standard.string(forKey: "appLanguage") ?? "en"
+        let resolved = languageIndex[stored] ?? 0
+        let changed = cachedLanguageIndex.withLock { current -> Bool in
+            guard current != resolved else { return false }
+            current = resolved
+            return true
+        }
+        if changed {
+            Task { @MainActor [weak self] in self?.objectWillChange.send() }
+        }
+    }
+
     private init() {
         if UserDefaults.standard.object(forKey: "appLanguage") == nil {
             let preferredLanguages = Locale.preferredLanguages
@@ -22,6 +44,15 @@ public class LocalizationManager: ObservableObject {
             }
             UserDefaults.standard.set(detectedLang, forKey: "appLanguage")
             self.appLanguage = detectedLang
+        }
+        refreshLanguageIndex()
+        // Backstop for any writer that goes straight to UserDefaults instead of this property.
+        NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification,
+            object: UserDefaults.standard,
+            queue: nil
+        ) { [weak self] _ in
+            self?.refreshLanguageIndex()
         }
     }
     private let translations: [String: [String]] = [
@@ -5827,9 +5858,8 @@ public class LocalizationManager: ObservableObject {
         "it": 5, "ja": 6, "pt": 7, "zh": 8,
     ]
     public func translate(_ key: String) -> String {
-        guard let index = languageIndex[appLanguage],
-              let values = translations[key],
-              index < values.count else {
+        let index = cachedLanguageIndex.withLock { $0 }
+        guard let values = translations[key], index < values.count else {
             return key
         }
         let value = values[index]

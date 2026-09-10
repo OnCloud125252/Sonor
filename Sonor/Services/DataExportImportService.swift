@@ -62,8 +62,6 @@ class DataExportImportService {
             history: history
         )
         
-        guard let jsonData = try? JSONEncoder().encode(exportData) else { return }
-        
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [.json]
         let formatter = DateFormatter()
@@ -71,8 +69,12 @@ class DataExportImportService {
         savePanel.nameFieldStringValue = "SonorBackup_\(formatter.string(from: Date())).json"
         
         savePanel.begin { response in
-            if response == .OK, let url = savePanel.url {
-                try? jsonData.write(to: url)
+            guard response == .OK, let url = savePanel.url else { return }
+            // Encoding a full backup and writing it can take a while, so it stays off the
+            // main thread and the window keeps responding.
+            Task.detached(priority: .userInitiated) {
+                guard let jsonData = try? JSONEncoder().encode(exportData) else { return }
+                try? jsonData.write(to: url, options: [.atomic])
             }
         }
     }
@@ -83,13 +85,15 @@ class DataExportImportService {
         openPanel.allowsMultipleSelection = false
         
         openPanel.begin { response in
-            if response == .OK, let url = openPanel.url {
-                DispatchQueue.main.async {
-                    guard let data = try? Data(contentsOf: url),
-                          let importedData = try? JSONDecoder().decode(SonorExportData.self, from: data) else {
-                        return
-                    }
-                    
+            guard response == .OK, let url = openPanel.url else { return }
+            Task.detached(priority: .userInitiated) {
+                // Reading and decoding the backup happens off the main thread; only the
+                // UserDefaults writes below need the main actor.
+                guard let data = try? Data(contentsOf: url),
+                      let importedData = try? JSONDecoder().decode(SonorExportData.self, from: data) else {
+                    return
+                }
+                await MainActor.run {
                     // Restore settings
                     if let settingsDict = try? JSONSerialization.jsonObject(with: importedData.settingsData) as? [String: Any] {
                         for (key, value) in settingsDict {
@@ -107,11 +111,8 @@ class DataExportImportService {
                     UserDefaults.standard.set(importedData.dictionary, forKey: "dictionaryEntries")
                     UserDefaults.standard.set(importedData.snippets, forKey: "snippetsEntries")
                     
-                    // Restore Stats
-                    if let statsData = try? JSONEncoder().encode(importedData.stats) {
-                        UserDefaults.standard.set(statsData, forKey: "usageStats")
-                        NotificationCenter.default.post(name: Notification.Name("UsageStatsUpdated"), object: nil)
-                    }
+                    // Restore Stats through the service so its in-memory copy stays in step.
+                    UsageTrackingService.shared.replaceAll(importedData.stats)
                     
                     // Restore History
                     if let history = importedData.history {

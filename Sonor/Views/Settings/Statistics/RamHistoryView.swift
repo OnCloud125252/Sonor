@@ -10,8 +10,12 @@ struct RamHistoryView: View {
     @State private var isShowingRamExplanation = false
     @State private var currentPage = 0
     let itemsPerPage = 5
-    var reversedMessages: [MemoryMessage] {
-        memoryManager.messages.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.reversed()
+    /// Cached because every read filtered and trimmed the whole history. The body read it
+    /// eight times per pass, which is what made scrolling the dashboard burn CPU.
+    @State private var reversedMessages: [MemoryMessage] = []
+
+    private static func makeReversedMessages(from messages: [MemoryMessage]) -> [MemoryMessage] {
+        messages.filter { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.reversed()
     }
     var totalPages: Int {
         let count = reversedMessages.count
@@ -191,7 +195,11 @@ struct RamHistoryView: View {
                 }
             }
         }
-        .onChange(of: reversedMessages.count) {
+        .onAppear {
+            reversedMessages = Self.makeReversedMessages(from: memoryManager.messages)
+        }
+        .onChange(of: memoryManager.messages) {
+            reversedMessages = Self.makeReversedMessages(from: memoryManager.messages)
             let maxPage = max(0, Int(ceil(Double(reversedMessages.count) / Double(itemsPerPage))) - 1)
             if currentPage > maxPage {
                 currentPage = maxPage

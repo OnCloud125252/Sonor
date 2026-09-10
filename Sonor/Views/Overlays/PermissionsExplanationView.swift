@@ -9,8 +9,9 @@ struct PermissionsExplanationView: View {
     
     @State private var hasAccessibility = false
     @State private var hasMicrophone = false
-    
-    let timer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
+    /// The window is hidden, not closed, so a `Timer.publish` here kept polling TCC once a
+    /// second for the rest of the process lifetime. The poll now runs only while on screen.
+    @State private var isOnScreen = false
     
     var body: some View {
         VStack(spacing: 24) {
@@ -72,10 +73,19 @@ struct PermissionsExplanationView: View {
         .frame(width: 520, height: 400)
         .background(colorScheme == .dark ? Color.black : Color.white)
         .onAppear {
+            isOnScreen = true
             checkPermissions()
         }
-        .onReceive(timer) { _ in
-            checkPermissions()
+        .onDisappear {
+            isOnScreen = false
+        }
+        .task(id: isOnScreen) {
+            guard isOnScreen else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                checkPermissions()
+            }
         }
     }
     

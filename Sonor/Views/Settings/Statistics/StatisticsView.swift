@@ -4,6 +4,9 @@ struct StatisticsView: View {
     @Environment(\.colorScheme) var colorScheme
     @ObservedObject var localizer = LocalizationManager.shared
     @State private var stats: [UsageStat] = []
+    /// Derived once when stats change. As a computed property it regrouped and re-sorted the
+    /// whole history three times on every body pass.
+    @State private var dailyStats: [DailyStat] = []
     @AppStorage("isIncognitoMode") private var isIncognitoMode = false
     @ObservedObject private var memoryManager = MessageMemoryManager.shared
     @State private var isShowingBenchmarkSheet = false
@@ -281,6 +284,7 @@ struct StatisticsView: View {
     }
     private func loadStats() {
         self.stats = UsageTrackingService.shared.getStats()
+        self.dailyStats = Self.makeDailyStats(from: self.stats)
     }
     private var totalSpeakingTime: Double {
         stats.reduce(0) { $0 + $1.duration }
@@ -388,29 +392,20 @@ struct StatisticsView: View {
         }
     }
 
-    private var dailyStats: [DailyStat] {
+    private static func makeDailyStats(from statsArray: [UsageStat]) -> [DailyStat] {
         let calendar = Calendar.current
-        let statsArray = self.stats
         let grouped: [Date: [UsageStat]] = Dictionary(grouping: statsArray) { (stat: UsageStat) -> Date in
             return calendar.startOfDay(for: stat.date)
         }
-        let mapped: [DailyStat] = grouped.map { (key: Date, value: [UsageStat]) -> DailyStat in
-            let wordCountSum = value.reduce(0) { (sum: Int, stat: UsageStat) -> Int in
-                return sum + stat.wordCount
+        return grouped
+            .map { (key: Date, value: [UsageStat]) -> DailyStat in
+                DailyStat(
+                    date: key,
+                    wordCount: value.reduce(0) { $0 + $1.wordCount },
+                    speakingTime: value.reduce(0.0) { $0 + $1.duration }
+                )
             }
-            let durationSum = value.reduce(0.0) { (sum: Double, stat: UsageStat) -> Double in
-                return sum + stat.duration
-            }
-            return DailyStat(
-                date: key,
-                wordCount: wordCountSum,
-                speakingTime: durationSum
-            )
-        }
-        let sorted = mapped.sorted { (a: DailyStat, b: DailyStat) -> Bool in
-            return a.date < b.date
-        }
-        return sorted
+            .sorted { $0.date < $1.date }
     }
     
     @ViewBuilder

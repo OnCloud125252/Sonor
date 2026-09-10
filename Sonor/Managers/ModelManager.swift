@@ -364,16 +364,40 @@ final class ModelManager: ObservableObject {
         createModelsDirectoryIfNeeded()
         checkInitialStates()
         checkMLXInitialStates()
-        
-        speedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+    }
+
+    private var hasActiveDownload: Bool {
+        mlxStates.values.contains(where: { $0.isDownloading })
+            || whisperStates.values.contains(where: { $0.isDownloading })
+    }
+
+    /// The speed sampler used to be a permanent 1 Hz timer that republished two dictionaries
+    /// every second, and so redrew every observer, even when nothing was downloading.
+    /// It now runs only while a download is in flight.
+    private func startSpeedTimerIfNeeded() {
+        guard speedTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.updateDownloadSpeeds()
             }
         }
-        RunLoop.main.add(speedTimer!, forMode: .common)
+        RunLoop.main.add(timer, forMode: .common)
+        speedTimer = timer
+    }
+
+    private func stopSpeedTimer() {
+        speedTimer?.invalidate()
+        speedTimer = nil
+        downloadBytesTracker.removeAll()
     }
     
     private func updateDownloadSpeeds() {
+        guard hasActiveDownload else {
+            // One last pass zeroes the displayed speed, then the timer goes away.
+            finishDownloadSpeeds()
+            stopSpeedTimer()
+            return
+        }
         let now = Date()
         
         // Update MLX stats
@@ -434,6 +458,26 @@ final class ModelManager: ObservableObject {
         }
         self.whisperDownloadStats = updatedWhisperStats
     }
+
+    private func finishDownloadSpeeds() {
+        var updatedMLXStats = self.mlxDownloadStats
+        var mlxChanged = false
+        for (modelId, stats) in updatedMLXStats where stats.speedBytesPerSecond > 0 {
+            updatedMLXStats[modelId]?.speedBytesPerSecond = 0
+            updatedMLXStats[modelId]?.speedHistory.append(0)
+            mlxChanged = true
+        }
+        if mlxChanged { self.mlxDownloadStats = updatedMLXStats }
+
+        var updatedWhisperStats = self.whisperDownloadStats
+        var whisperChanged = false
+        for (modelId, stats) in updatedWhisperStats where stats.speedBytesPerSecond > 0 {
+            updatedWhisperStats[modelId]?.speedBytesPerSecond = 0
+            updatedWhisperStats[modelId]?.speedHistory.append(0)
+            whisperChanged = true
+        }
+        if whisperChanged { self.whisperDownloadStats = updatedWhisperStats }
+    }
     private func createModelsDirectoryIfNeeded() {
         if !FileManager.default.fileExists(atPath: modelsDirectory.path) {
             do {
@@ -460,8 +504,15 @@ final class ModelManager: ObservableObject {
                 if let attributes = try? FileManager.default.attributesOfItem(atPath: whisperPath),
                    let size = attributes[.size] as? Int64 {
                     if size >= expectedSizeInBytes - 1000 {
-                        if let expectedSHA256 = model.expectedSHA256 {
-                            Task.detached {
+                        // Hashing the 574 MB model read the whole file at every launch. The
+                        // result is remembered per file identity (size and modification date),
+                        // so the read happens once per downloaded file.
+                        let modified = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+                        let verifiedKey = "whisperVerified_\(model.id)"
+                        let identity = "\(size)-\(Int64(modified))"
+                        if let expectedSHA256 = model.expectedSHA256,
+                           UserDefaults.standard.string(forKey: verifiedKey) != identity {
+                            Task.detached(priority: .utility) {
                                 if let fileData = try? Data(contentsOf: URL(fileURLWithPath: whisperPath), options: .mappedIfSafe) {
                                     let hash = CryptoKit.SHA256.hash(data: fileData)
                                     let hashString = hash.compactMap { String(format: "%02x", $0) }.joined()
@@ -469,6 +520,8 @@ final class ModelManager: ObservableObject {
                                         if hashString != expectedSHA256 {
                                             try? FileManager.default.removeItem(atPath: whisperPath)
                                             self.whisperStates[model.id] = .notDownloaded
+                                        } else {
+                                            UserDefaults.standard.set(identity, forKey: verifiedKey)
                                         }
                                     }
                                 }
@@ -558,6 +611,7 @@ final class ModelManager: ObservableObject {
     func downloadMLXModel(modelId: String) {
         guard let model = availableMLXModels.first(where: { $0.id == modelId }) else { return }
         mlxStates[modelId] = .downloading(progress: 0.0)
+        startSpeedTimerIfNeeded()
         let repoId = model.repoId
         
         let downloader = MLXModelDownloader(modelsDirectory: modelsDirectory, repoId: repoId)
@@ -645,7 +699,8 @@ final class ModelManager: ObservableObject {
             activeMLXDownloadTexts[modelId] = nil
         }
         mlxStates[modelId] = .notDownloaded
-        let repo = Hub.Repo(id: availableMLXModels.first(where: { $0.id == modelId })!.repoId)
+        guard let config = availableMLXModels.first(where: { $0.id == modelId }) else { return }
+        let repo = Hub.Repo(id: config.repoId)
         let api = HubApi(downloadBase: modelsDirectory, cache: nil, useBackgroundSession: false)
         let dir = api.localRepoLocation(repo)
         try? FileManager.default.removeItem(at: dir)
@@ -711,6 +766,7 @@ final class ModelManager: ObservableObject {
             initialWhisperProgress = min(Double(size) / expectedSize, 0.99)
         }
         whisperStates[modelId] = .downloading(progress: initialWhisperProgress)
+        startSpeedTimerIfNeeded()
         activeWhisperDownloader?.cancel()
         
         if let activeId = activeWhisperModelId {
@@ -1107,9 +1163,15 @@ final class WhisperDownloader: NSObject, URLSessionDataDelegate {
                 try? fileHandle?.truncate(atOffset: 0)
                 downloadedBytes = 0
             }
+            // A 416 body is a server error page, not model bytes. Discard the stale partial
+            // file and fail so the next attempt starts a clean download.
             if statusCode == 416 {
                 try? fileHandle?.truncate(atOffset: 0)
                 downloadedBytes = 0
+                completionCallback?(.failure(NSError(domain: "WhisperDownloader", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Stale partial download discarded. Please retry."])))
+                completionHandler(.cancel)
+                cleanup()
+                return
             } else if !(200...299).contains(statusCode) {
                 completionCallback?(.failure(NSError(domain: "WhisperDownloader", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Bad status code: \(statusCode)"])))
                 completionHandler(.cancel)
@@ -1338,10 +1400,16 @@ private var currentFileExpectedBytes: Int64 = 0
                 totalDownloadedBytes -= currentFileDownloadedBytes
                 currentFileDownloadedBytes = 0
             }
+            // A 416 body is a server error page, not model bytes. Discard the stale partial
+            // file and fail so the next attempt starts a clean download.
             if statusCode == 416 {
                 try? fileHandle?.truncate(atOffset: 0)
                 totalDownloadedBytes -= currentFileDownloadedBytes
                 currentFileDownloadedBytes = 0
+                completionCallback?(.failure(NSError(domain: "GemmaDownloader", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Stale partial download discarded. Please retry."])))
+                completionHandler(.cancel)
+                cleanup()
+                return
             } else if !(200...299).contains(statusCode) {
                 completionCallback?(.failure(NSError(domain: "GemmaDownloader", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Bad status code: \(statusCode)"])))
                 completionHandler(.cancel)
@@ -1593,10 +1661,16 @@ final class MLXModelDownloader: NSObject, URLSessionDataDelegate {
                 totalDownloadedBytes -= currentFileDownloadedBytes
                 currentFileDownloadedBytes = 0
             }
+            // A 416 body is a server error page, not model bytes. Discard the stale partial
+            // file and fail so the next attempt starts a clean download.
             if statusCode == 416 {
                 try? fileHandle?.truncate(atOffset: 0)
                 totalDownloadedBytes -= currentFileDownloadedBytes
                 currentFileDownloadedBytes = 0
+                completionCallback?(.failure(NSError(domain: "MLXDownloader", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Stale partial download discarded. Please retry."])))
+                completionHandler(.cancel)
+                cleanup()
+                return
             } else if !(200...299).contains(statusCode) {
                 completionCallback?(.failure(NSError(domain: "MLXDownloader", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Bad status code: \(statusCode)"])))
                 completionHandler(.cancel)

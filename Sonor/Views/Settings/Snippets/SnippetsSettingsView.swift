@@ -284,7 +284,7 @@ struct SnippetsSettingsView: View {
                         .stroke(colorScheme == .dark ? Color.white.opacity(0.06) : Color.black.opacity(0.05), style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round, miterLimit: 10, dash: [5, 5], dashPhase: 0))
                 )
             } else {
-                VStack(spacing: 12) {
+                LazyVStack(spacing: 12) {
                     ForEach(sortedKeys, id: \.self) { key in
                         if let value = entries[key] {
                             rowView(key: key, value: value)

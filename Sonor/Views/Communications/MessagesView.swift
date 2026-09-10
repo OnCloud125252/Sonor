@@ -118,19 +118,32 @@ struct AppMessageCardView: View {
         }
     }
     
-    private func parseDate(_ dateStr: String) -> Date? {
+    // Formatters are costly to build and were rebuilt on every render of every message row.
+    private static let fractionalISOFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = formatter.date(from: dateStr) { return d }
-        
+        return formatter
+    }()
+
+    private static let plainISOFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: dateStr)
-    }
-    
-    private func formatDate(_ date: Date) -> String {
+        return formatter
+    }()
+
+    private static let displayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    private func parseDate(_ dateStr: String) -> Date? {
+        if let parsed = Self.fractionalISOFormatter.date(from: dateStr) { return parsed }
+        return Self.plainISOFormatter.date(from: dateStr)
+    }
+    
+    private func formatDate(_ date: Date) -> String {
+        Self.displayFormatter.string(from: date)
     }
 }

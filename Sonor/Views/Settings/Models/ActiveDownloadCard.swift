@@ -182,12 +182,18 @@ struct ActiveDownloadCard: View {
         }
     }
     
-    private func formatBytes(_ bytes: Int64) -> String {
-        if bytes <= 0 { return "0 KB" }
+    // Built once. This card redraws on every download progress tick, and the formatter was
+    // rebuilt for each byte count it showed.
+    private static let byteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
+        return formatter
+    }()
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        if bytes <= 0 { return "0 KB" }
+        return Self.byteFormatter.string(fromByteCount: bytes)
     }
     
     private func formatTime(seconds: Double) -> String {
