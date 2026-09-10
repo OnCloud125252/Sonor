@@ -5,6 +5,9 @@ struct ModeCard: View {
     let isSelected: Bool
     let isPremium: Bool
     let isRawOutput: Bool
+    var isDefault: Bool = false
+    var onToggleEnabled: (() -> Void)? = nil
+    var onMakeDefault: (() -> Void)? = nil
     let onSelect: () -> Void
     let onSettings: () -> Void
     @Environment(\.colorScheme) var colorScheme
@@ -47,10 +50,17 @@ struct ModeCard: View {
     var body: some View {
         ZStack {
             VStack(alignment: .leading, spacing: 10) {
-                HStack {
+                HStack(spacing: 6) {
                     Text(t(mode.name))
                         .font(.system(size: 14, weight: .bold))
                         .foregroundColor(isSelected ? (colorScheme == .dark ? .black : .white) : .primary)
+                        .lineLimit(1)
+                    if isDefault {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(isSelected ? (colorScheme == .dark ? .black : .white) : .primary)
+                            .help(t("Default assistant"))
+                    }
                     Spacer()
                     if isRawOutput {
                         Text(t("Main Assistant"))
@@ -90,6 +100,27 @@ struct ModeCard: View {
             }
             .padding(15)
             .blur(radius: isPremium || isRawOutput ? 0 : 3.5)
+            .opacity(mode.isActive ? 1.0 : 0.45)
+
+            if isHovered, onToggleEnabled != nil || onMakeDefault != nil {
+                VStack {
+                    HStack(spacing: 6) {
+                        Spacer()
+                        if let onMakeDefault = onMakeDefault, mode.isActive, !isDefault {
+                            cardActionButton(icon: "star", help: t("Use as default assistant"), action: onMakeDefault)
+                        }
+                        if let onToggleEnabled = onToggleEnabled {
+                            cardActionButton(
+                                icon: mode.isActive ? "eye.slash" : "eye",
+                                help: mode.isActive ? t("Disable assistant") : t("Enable assistant"),
+                                action: onToggleEnabled
+                            )
+                        }
+                    }
+                    Spacer()
+                }
+                .padding(8)
+            }
             if !isPremium && !isRawOutput {
                 Color.black.opacity(0.2)
                     .cornerRadius(16)
@@ -125,6 +156,18 @@ struct ModeCard: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
     }
+    private func cardActionButton(icon: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(colorScheme == .dark ? .black : .white)
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(colorScheme == .dark ? Color.white : Color.black))
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
     @ViewBuilder
     private var cardBackground: some View {
         if isSelected {

@@ -52,6 +52,8 @@ class MediaControlService {
     private var muteWorkItem: DispatchWorkItem?
     private var unmuteTask: Task<Void, Never>?
     private var muteGeneration: Int = 0
+    /// Retires an in-flight background media check when the recording state moves on.
+    private var pauseCheckGeneration: Int = 0
     private var didMuteAudio: Bool = false
     private var wasAudioMutedBeforeRecording: Bool = false
     
@@ -64,21 +66,50 @@ class MediaControlService {
     private let mediaController = MediaRemoteAdapter.MediaController()
     private var isMediaCurrentlyPlaying = false
     private var currentPlayingBundleId: String? = nil
+    private var isListeningToMedia = false
     
     private init() {
-        // Start tracking media state continuously in the background
-        // This is necessary because querying it on-demand might take too long (latency)
+        // The adapter is a perl child process that stays resident and reports every
+        // now-playing change. It is only useful to an assistant that pauses media, so it
+        // runs only while such an assistant exists instead of for the whole session.
         mediaController.onTrackInfoReceived = { [weak self] trackInfo in
             Task { @MainActor in
                 self?.isMediaCurrentlyPlaying = trackInfo?.payload.isPlaying ?? false
                 self?.currentPlayingBundleId = trackInfo?.payload.bundleIdentifier
             }
         }
-        mediaController.startListening()
+        syncMediaListener(with: VoiceMode.loadAndMigrateModes())
+        NotificationCenter.default.addObserver(forName: Notification.Name("VoiceModesUpdated"), object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.syncMediaListener(with: VoiceMode.loadAndMigrateModes())
+            }
+        }
     }
     
     deinit {
         mediaController.stopListening()
+    }
+
+    /// True when at least one enabled assistant pauses media, so the helper has work to do.
+    nonisolated static func needsMediaListener(for modes: [VoiceMode]) -> Bool {
+        VoiceMode.active(in: modes).contains { mode in
+            mode.audioBehavior == .pause || mode.audioBehavior == .muteAndPause
+        }
+    }
+
+    /// Starts the now-playing listener when any enabled assistant pauses media, and stops
+    /// it (ending the helper process) when none does.
+    func syncMediaListener(with modes: [VoiceMode]) {
+        let needsListener = Self.needsMediaListener(for: modes)
+        guard needsListener != isListeningToMedia else { return }
+        isListeningToMedia = needsListener
+        if needsListener {
+            mediaController.startListening()
+        } else {
+            mediaController.stopListening()
+            isMediaCurrentlyPlaying = false
+            currentPlayingBundleId = nil
+        }
     }
     
     // MARK: - Public API
@@ -128,6 +159,9 @@ class MediaControlService {
         // jeśli użytkownik bardzo szybko zakończył nagrywanie.
         muteWorkItem?.cancel()
         muteWorkItem = nil
+        // Retires any mute that is already running. Cancelling the work item is not enough once
+        // its body has started, and that left the Mac muted with no unmute pending.
+        muteGeneration += 1
         
         switch prevBehavior {
         case .mute:
@@ -175,6 +209,8 @@ class MediaControlService {
     
     private func performMute(isAlreadyManaging: Bool) {
         muteWorkItem?.cancel()
+        muteGeneration += 1
+        let generation = muteGeneration
         let item = DispatchWorkItem { [weak self] in
             Task.detached(priority: .userInitiated) { [weak self] in
                 guard let self = self else { return }
@@ -182,33 +218,37 @@ class MediaControlService {
                 // Wolne calle do CoreAudio wykonujemy w tle
                 let currentlyMuted = self.isSystemAudioMuted()
                 
-                await MainActor.run {
+                // The recording can end while CoreAudio is being queried. Applying the mute
+                // after that point muted the Mac permanently, because the unmute already ran.
+                let stillWanted = await MainActor.run { () -> Bool in
+                    guard self.muteGeneration == generation, self.mutingIsActive else { return false }
                     self.unmuteTask?.cancel()
                     self.unmuteTask = nil
-                    self.muteGeneration += 1
-                    
-                    if currentlyMuted {
-                        if self.didMuteAudio {
-                            self.wasAudioMutedBeforeRecording = false
-                        } else {
-                            self.wasAudioMutedBeforeRecording = true
-                            self.didMuteAudio = false
-                        }
-                    } else {
-                        self.wasAudioMutedBeforeRecording = false
-                    }
+                    self.wasAudioMutedBeforeRecording = currentlyMuted && !self.didMuteAudio
+                    return true
                 }
+                guard stillWanted else { return }
                 
                 if !currentlyMuted {
                     let success = self.setSystemMuted(true)
-                    await MainActor.run {
+                    let keepMuted = await MainActor.run { () -> Bool in
+                        guard self.muteGeneration == generation, self.mutingIsActive else { return false }
                         self.didMuteAudio = success
+                        return true
+                    }
+                    if !keepMuted && success {
+                        // The recording finished during the CoreAudio write. Undo right away.
+                        _ = self.setSystemMuted(false)
                     }
                 }
             }
         }
         muteWorkItem = item
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5, execute: item)
+    }
+
+    private var mutingIsActive: Bool {
+        activeAudioBehavior == .mute || activeAudioBehavior == .muteAndPause
     }
     
     private func performUnmute(delay: TimeInterval) {
@@ -241,28 +281,48 @@ class MediaControlService {
     
     private func performPause() {
         print("[MediaControlService] performPause: checking if media is playing...")
-        
-        // 1. Sprawdzamy czy COKOLWIEK gra, używając danych śledzonych na bieżąco.
-        // Jeśli adapter jeszcze nie złapał stanu, ratujemy się AppleScriptem.
-        var isPlaying = isMediaCurrentlyPlaying
-        if !isPlaying {
-            isPlaying = checkIfMediaIsPlayingAppleScript()
+        // A pause request can arrive for an assistant that was just switched to pausing,
+        // before the settings screen has posted its update.
+        if !isListeningToMedia {
+            isListeningToMedia = true
+            mediaController.startListening()
         }
         
-        guard isPlaying else {
-            print("[MediaControlService] Nothing is currently playing, skipping pause.")
-            wasPlayingBeforeRecording = false
-            pausedMediaBundleId = nil
+        // 1. Sprawdzamy czy COKOLWIEK gra, używając danych śledzonych na bieżąco.
+        if isMediaCurrentlyPlaying {
+            applyPause()
             return
         }
         
+        wasPlayingBeforeRecording = false
+        pausedMediaBundleId = nil
+        
+        // 2. Adapter nie złapał stanu, ratujemy się AppleScriptem.
+        // The script talks to System Events, Music and Spotify and takes 77 ms to 389 ms here.
+        // Running it inline delayed the start of every recording, so it runs in the background
+        // and pauses afterwards only if the recording is still asking for a pause.
+        let generation = pauseCheckGeneration &+ 1
+        pauseCheckGeneration = generation
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self = self else { return }
+            let isPlaying = self.checkIfMediaIsPlayingAppleScript()
+            guard isPlaying else { return }
+            await MainActor.run {
+                guard self.pauseCheckGeneration == generation else { return }
+                guard self.activeAudioBehavior == .pause || self.activeAudioBehavior == .muteAndPause else { return }
+                self.applyPause()
+            }
+        }
+    }
+
+    private func applyPause() {
         print("[MediaControlService] Media IS playing (App: \(currentPlayingBundleId ?? "unknown")). Pausing now...")
         
-        // 2. Skoro gra, oznaczamy że to MY będziemy odpowiedzialni za wznowienie.
+        // Skoro gra, oznaczamy że to MY będziemy odpowiedzialni za wznowienie.
         wasPlayingBeforeRecording = true
         pausedMediaBundleId = currentPlayingBundleId
         
-        // 3. Wykonujemy faktyczną pauzę (używając stabilnego adaptera)
+        // Wykonujemy faktyczną pauzę (używając stabilnego adaptera)
         mediaController.pause()
     }
     

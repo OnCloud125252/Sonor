@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ModesSettingsView: View {
     @Binding var modes: [VoiceMode]
@@ -11,6 +12,17 @@ struct ModesSettingsView: View {
         GridItem(.adaptive(minimum: 160))
     ]
     @State private var isHoveringPlus = false
+    @State private var draggingModeID: UUID? = nil
+    /// Mirrors the stored default so the star updates as soon as it is set.
+    @State private var defaultModeID: String = UserDefaults.standard.string(forKey: VoiceMode.defaultModeIDKey) ?? ""
+
+    /// "Pure Text" keeps its own wide card at the top, so the grid shows everything else.
+    private var gridModes: [VoiceMode] {
+        modes.filter { $0.name != "Pure Text" }
+    }
+    private var enabledCount: Int {
+        VoiceMode.active(in: modes).count
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
@@ -53,39 +65,32 @@ struct ModesSettingsView: View {
                 }
                 .buttonStyle(.plain)
             }
+            Text(t("Drag a card to reorder. The order sets how the assistant shortcut cycles through them."))
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+
             ScrollView {
                 VStack(spacing: 15) {
                     if let rawOutput = modes.first(where: { $0.name == "Pure Text" }) {
-                        ModeCard(
-                            mode: rawOutput,
-                            isSelected: selectedModeID == rawOutput.id.uuidString,
-                            isPremium: true,
-                            isRawOutput: true
-                        ) {
-                            selectedModeID = rawOutput.id.uuidString
-                        } onSettings: {
-                            selectedModeID = rawOutput.id.uuidString
-                            withAnimation {
-                                isShowingSidePanel = true
-                            }
-                        }
-                        .frame(maxWidth: .infinity)
+                        modeCard(for: rawOutput, isRawOutput: true)
+                            .frame(maxWidth: .infinity)
                     }
                     LazyVGrid(columns: columns, spacing: 15) {
-                        ForEach(modes.filter { $0.name != "Pure Text" }) { mode in
-                            ModeCard(
-                                mode: mode,
-                                isSelected: selectedModeID == mode.id.uuidString,
-                                isPremium: true,
-                                isRawOutput: false
-                            ) {
-                                selectedModeID = mode.id.uuidString
-                            } onSettings: {
-                                selectedModeID = mode.id.uuidString
-                                withAnimation {
-                                    isShowingSidePanel = true
+                        ForEach(gridModes) { mode in
+                            modeCard(for: mode, isRawOutput: false)
+                                .onDrag {
+                                    draggingModeID = mode.id
+                                    return NSItemProvider(object: mode.id.uuidString as NSString)
                                 }
-                            }
+                                .onDrop(
+                                    of: [UTType.text],
+                                    delegate: ModeReorderDropDelegate(
+                                        target: mode,
+                                        modes: $modes,
+                                        draggingModeID: $draggingModeID,
+                                        onReordered: persistModes
+                                    )
+                                )
                         }
                     }
                 }
@@ -94,9 +99,63 @@ struct ModesSettingsView: View {
                 .padding(.bottom, 10)
             }
         }
+        .onAppear {
+            defaultModeID = UserDefaults.standard.string(forKey: VoiceMode.defaultModeIDKey) ?? ""
+        }
         .sheet(isPresented: $isShowingInfo) {
             AssistantsExplanationView()
         }
+    }
+
+    private func modeCard(for mode: VoiceMode, isRawOutput: Bool) -> some View {
+        ModeCard(
+            mode: mode,
+            isSelected: selectedModeID == mode.id.uuidString,
+            isPremium: true,
+            isRawOutput: isRawOutput,
+            isDefault: defaultModeID == mode.id.uuidString,
+            onToggleEnabled: { toggleEnabled(mode) },
+            onMakeDefault: { makeDefault(mode) }
+        ) {
+            selectedModeID = mode.id.uuidString
+        } onSettings: {
+            selectedModeID = mode.id.uuidString
+            withAnimation {
+                isShowingSidePanel = true
+            }
+        }
+        .opacity(draggingModeID == mode.id ? 0.4 : 1.0)
+    }
+
+    private func toggleEnabled(_ mode: VoiceMode) {
+        guard let index = modes.firstIndex(where: { $0.id == mode.id }) else { return }
+        let turningOff = modes[index].isActive
+        // Recording needs somewhere to go, so the last enabled assistant cannot be switched off.
+        if turningOff && enabledCount <= 1 { return }
+        withAnimation {
+            modes[index].isEnabled = !turningOff
+        }
+        if turningOff && defaultModeID == mode.id.uuidString {
+            // The default was just disabled, so hand the role to the next enabled assistant.
+            if let replacement = VoiceMode.active(in: modes).first {
+                VoiceMode.setDefaultModeID(replacement.id)
+                defaultModeID = replacement.id.uuidString
+            }
+        }
+        persistModes()
+    }
+
+    private func makeDefault(_ mode: VoiceMode) {
+        guard mode.isActive else { return }
+        VoiceMode.setDefaultModeID(mode.id)
+        defaultModeID = mode.id.uuidString
+        NotificationCenter.default.post(name: Notification.Name("VoiceModesUpdated"), object: nil)
+    }
+
+    private func persistModes() {
+        guard let data = try? JSONEncoder().encode(modes) else { return }
+        UserDefaults.standard.set(data, forKey: "voiceModes")
+        NotificationCenter.default.post(name: Notification.Name("VoiceModesUpdated"), object: nil)
     }
     private func addNewMode() {
         let baseName = t("New Assistant")
@@ -110,10 +169,35 @@ struct ModesSettingsView: View {
         
         let newMode = VoiceMode(name: finalName, prompt: "", boundAppBundleIDs: [], audioBehavior: .keep, assistantType: "dictation", language: "auto", fallbackBehavior: "overlay")
         modes.append(newMode)
-        if let data = try? JSONEncoder().encode(modes) {
-            UserDefaults.standard.set(data, forKey: "voiceModes")
-            NotificationCenter.default.post(name: Notification.Name("VoiceModesUpdated"), object: nil)
-        }
+        persistModes()
         selectedModeID = newMode.id.uuidString
+    }
+}
+
+/// Moves the dragged assistant in front of the card it is dropped on.
+private struct ModeReorderDropDelegate: DropDelegate {
+    let target: VoiceMode
+    @Binding var modes: [VoiceMode]
+    @Binding var draggingModeID: UUID?
+    let onReordered: () -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let draggingModeID = draggingModeID,
+              draggingModeID != target.id,
+              let from = modes.firstIndex(where: { $0.id == draggingModeID }),
+              let to = modes.firstIndex(where: { $0.id == target.id }) else { return }
+        withAnimation {
+            modes.move(fromOffsets: IndexSet(integer: from), toOffset: to > from ? to + 1 : to)
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggingModeID = nil
+        onReordered()
+        return true
     }
 }

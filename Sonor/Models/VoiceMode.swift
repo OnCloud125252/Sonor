@@ -24,7 +24,15 @@ struct VoiceMode: Identifiable, Codable, Equatable {
     var fallbackBehavior: String? // "none", "overlay", "clipboard"
     var postPasteAction: String?
     var modelOverride: String?
-    init(id: UUID = UUID(), name: String, prompt: String, boundAppBundleIDs: [String] = [], audioBehavior: AudioBehavior? = .keep, assistantType: String? = "dictation", passAppName: Bool? = true, passCopiedText: Bool? = true, language: String? = "auto", isBuiltIn: Bool? = false, fallbackBehavior: String? = "overlay", postPasteAction: String? = "none", modelOverride: String? = nil, fallbackToClipboard: Bool? = nil) {
+    /// Optional so that assistants saved before this flag existed stay enabled.
+    var isEnabled: Bool?
+    /// nil follows the global choice. Otherwise an `LLMProvider` raw value.
+    var llmProviderOverride: String?
+    /// Cloud model for this assistant only. nil uses the model from the global settings.
+    var llmModelOverride: String?
+    /// Sampling temperature for this assistant only. nil uses the global value.
+    var llmTemperatureOverride: Double?
+    init(id: UUID = UUID(), name: String, prompt: String, boundAppBundleIDs: [String] = [], audioBehavior: AudioBehavior? = .keep, assistantType: String? = "dictation", passAppName: Bool? = true, passCopiedText: Bool? = true, language: String? = "auto", isBuiltIn: Bool? = false, fallbackBehavior: String? = "overlay", postPasteAction: String? = "none", modelOverride: String? = nil, fallbackToClipboard: Bool? = nil, isEnabled: Bool? = nil, llmProviderOverride: String? = nil, llmModelOverride: String? = nil, llmTemperatureOverride: Double? = nil) {
         self.id = id
         self.name = name
         self.prompt = prompt
@@ -39,6 +47,14 @@ struct VoiceMode: Identifiable, Codable, Equatable {
         self.postPasteAction = postPasteAction
         self.modelOverride = modelOverride
         self.fallbackToClipboard = fallbackToClipboard
+        self.isEnabled = isEnabled
+        self.llmProviderOverride = llmProviderOverride
+        self.llmModelOverride = llmModelOverride
+        self.llmTemperatureOverride = llmTemperatureOverride
+    }
+    /// An assistant the user switched off stays saved but never appears in the picker.
+    var isActive: Bool {
+        isEnabled ?? true
     }
     var isBuiltInMode: Bool {
         if isBuiltIn == true {
@@ -141,23 +157,9 @@ struct VoiceMode: Identifiable, Codable, Equatable {
                 modes.insert(defaultMode, at: insertIndex)
             }
         }
-        
 
-        modes.sort { mode1, mode2 in
-            let index1 = defaults.firstIndex(where: { $0.name == mode1.name })
-            let index2 = defaults.firstIndex(where: { $0.name == mode2.name })
-            
-            if let i1 = index1, let i2 = index2 {
-                return i1 < i2
-            } else if index1 != nil {
-                return true
-            } else if index2 != nil {
-                return false
-            } else {
-                return false
-            }
-        }
-        
+        // The list is deliberately left in its stored order. Re-sorting here would throw away
+        // the order the user arranged in the dashboard on every single load.
         save(modes)
         return modes
     }
@@ -165,5 +167,33 @@ struct VoiceMode: Identifiable, Codable, Equatable {
         if let data = try? JSONEncoder().encode(modes) {
             UserDefaults.standard.set(data, forKey: "voiceModes")
         }
+    }
+}
+
+// MARK: - Selection
+
+extension VoiceMode {
+    static let defaultModeIDKey = "defaultModeID"
+
+    /// Assistants the user left switched on, in the order they arranged them.
+    static func active(in modes: [VoiceMode]) -> [VoiceMode] {
+        modes.filter { $0.isActive }
+    }
+
+    /// The assistant a new recording starts with.
+    /// Falls back to the first enabled assistant when the chosen default was disabled or
+    /// deleted, so recording never starts with an assistant the user switched off.
+    static func resolveDefault(in modes: [VoiceMode]) -> VoiceMode? {
+        let enabled = active(in: modes)
+        let storedID = UserDefaults.standard.string(forKey: defaultModeIDKey) ?? ""
+        return enabled.first(where: { $0.id.uuidString == storedID }) ?? enabled.first
+    }
+
+    static func setDefaultModeID(_ id: UUID) {
+        UserDefaults.standard.set(id.uuidString, forKey: defaultModeIDKey)
+    }
+
+    static func isDefaultMode(_ id: UUID) -> Bool {
+        UserDefaults.standard.string(forKey: defaultModeIDKey) == id.uuidString
     }
 }
