@@ -69,7 +69,7 @@ class AppController: NSObject, ObservableObject {
     private var lastRecordingStopTime: Date = Date.distantPast
     private var lastRecordingStartTime: Date = Date.distantPast
     var isCurrentlyProcessing: Bool {
-        let nonProcessingStatuses: Set<String> = ["Ready", "Cancelled", "No microphone permission", "Microphone error", "No text recognized.", "Error: Missing model", "Done!", "Transcription failed"]
+        let nonProcessingStatuses: Set<String> = ["Ready", "Cancelled", "No microphone permission", "Microphone error", "No text recognized.", "Error: Missing model", "Done!", "Transcription failed", "Assistant failed"]
         return !isRecording && !nonProcessingStatuses.contains(statusText) && !statusText.hasPrefix("Mode:")
     }
     let audioLevelStore = AudioLevelStore()
@@ -210,7 +210,7 @@ class AppController: NSObject, ObservableObject {
     func selectNextMode() {
         guard isRecording else { return }
         
-        let terminalStates = ["Cancelled", "Done!", "No text recognized.", "Error: Missing model", "No microphone permission", "Microphone error"]
+        let terminalStates = ["Cancelled", "Done!", "No text recognized.", "Error: Missing model", "No microphone permission", "Microphone error", "Assistant failed"]
         if isCurrentlyProcessing || terminalStates.contains(statusText) {
             return
         }

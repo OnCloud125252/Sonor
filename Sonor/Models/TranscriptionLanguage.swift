@@ -30,10 +30,32 @@ public struct TranscriptionLanguage: Identifiable, Hashable, Sendable {
         isAutomatic ? nil : whisperCode
     }
 
-    /// Apple Speech needs a locale. `Locale` supplies a region when the code omits one.
+    /// Apple Speech needs a dictation locale. `Locale` supplies a region when the code omits
+    /// one. A script subtag has no dictation locale of its own, so it maps to a region Apple
+    /// ships.
     public var appleLocale: Locale? {
-        isAutomatic ? nil : Locale(identifier: code.replacingOccurrences(of: "-", with: "_"))
+        guard !isAutomatic else { return nil }
+        let identifier = Self.appleLocaleOverrides[code] ?? code
+        return Locale(identifier: identifier.replacingOccurrences(of: "-", with: "_"))
     }
+
+    /// A short line written in the wanted script, or nil when the language has one script.
+    ///
+    /// Whisper writes Chinese in the simplified script by default, whatever the speaker used.
+    /// Seeding `initial_prompt` with the wanted script is the documented way to steer it.
+    public var scriptSeedPrompt: String? {
+        switch code {
+        case "zh-Hant": return "以下是繁體中文的逐字稿。"
+        case "zh-Hans": return "以下是简体中文的逐字稿。"
+        default: return nil
+        }
+    }
+
+    private static let appleLocaleOverrides: [String: String] = [
+        "zh": "zh-CN",
+        "zh-Hant": "zh-TW",
+        "zh-Hans": "zh-CN"
+    ]
 }
 
 // MARK: - Catalog
@@ -79,7 +101,11 @@ public extension TranscriptionLanguage {
         TranscriptionLanguage(code: "tr", nativeName: "Türkçe", englishName: "Turkish"),
         TranscriptionLanguage(code: "uk", nativeName: "Українська", englishName: "Ukrainian"),
         TranscriptionLanguage(code: "vi", nativeName: "Tiếng Việt", englishName: "Vietnamese"),
-        TranscriptionLanguage(code: "zh", nativeName: "中文", englishName: "Chinese")
+        TranscriptionLanguage(code: "zh", nativeName: "中文", englishName: "Chinese"),
+        // Whisper has one `zh` token, so both entries transcribe the same way. They differ in
+        // the script Sonor asks for, which is what the reader actually sees.
+        TranscriptionLanguage(code: "zh-Hant", nativeName: "中文（繁體）", englishName: "Traditional Chinese"),
+        TranscriptionLanguage(code: "zh-Hans", nativeName: "中文（简体）", englishName: "Simplified Chinese")
     ]
 
     static func named(_ code: String) -> TranscriptionLanguage {

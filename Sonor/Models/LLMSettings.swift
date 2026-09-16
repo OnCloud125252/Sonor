@@ -77,7 +77,13 @@ final class LLMSettings: ObservableObject {
         static let baseURL = "llmAPIBaseURL"
         static let modelName = "llmAPIModelName"
         static let temperature = "llmAPITemperature"
+        static let reasoningEffort = "llmAPIReasoningEffort"
     }
+
+    /// The reasoning efforts an OpenAI compatible endpoint accepts.
+    ///
+    /// The empty entry means Sonor sends no field, so the service keeps its own default.
+    static let reasoningEffortOptions = ["", "minimal", "low", "medium", "high"]
 
     private static let keychainAccount = "llmAPIKey"
 
@@ -107,6 +113,10 @@ final class LLMSettings: ObservableObject {
         didSet { UserDefaults.standard.set(temperature, forKey: Keys.temperature) }
     }
 
+    @Published var reasoningEffort: String {
+        didSet { UserDefaults.standard.set(reasoningEffort, forKey: Keys.reasoningEffort) }
+    }
+
     @Published var apiKey: String {
         didSet { KeychainStore.write(apiKey, account: Self.keychainAccount) }
     }
@@ -120,6 +130,7 @@ final class LLMSettings: ObservableObject {
         self.modelName = defaults.string(forKey: Keys.modelName) ?? LLMAPIPreset.all[0].suggestedModel
         let storedTemperature = defaults.object(forKey: Keys.temperature) as? Double
         self.temperature = storedTemperature ?? 0.7
+        self.reasoningEffort = defaults.string(forKey: Keys.reasoningEffort) ?? ""
         self.apiKey = KeychainStore.read(account: Self.keychainAccount) ?? ""
     }
 
@@ -136,7 +147,8 @@ final class LLMSettings: ObservableObject {
             baseURL: baseURL.trimmingCharacters(in: .whitespacesAndNewlines),
             apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines),
             modelName: modelName.trimmingCharacters(in: .whitespacesAndNewlines),
-            temperature: temperature
+            temperature: temperature,
+            reasoningEffort: reasoningEffort
         )
     }
 
@@ -157,7 +169,8 @@ final class LLMSettings: ObservableObject {
                 baseURL: baseURL.trimmingCharacters(in: .whitespacesAndNewlines),
                 apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines),
                 modelName: effectiveModel,
-                temperature: mode?.llmTemperatureOverride ?? temperature
+                temperature: mode?.llmTemperatureOverride ?? temperature,
+                reasoningEffort: reasoningEffort
             )
         )
     }

@@ -9,7 +9,7 @@ struct LLMAPICard: View {
     private enum TestState: Equatable {
         case idle
         case testing
-        case success
+        case success(String)
         case failure(String)
     }
 
@@ -21,8 +21,10 @@ struct LLMAPICard: View {
             presetRow
             endpointRow
             modelRow
+            reasoningRow
             keyRow
             testRow
+            testNote
             privacyNote
         }
         .padding(20)
@@ -84,6 +86,24 @@ struct LLMAPICard: View {
         }
     }
 
+    private var reasoningRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            row(title: t("Reasoning")) {
+                Picker("", selection: $settings.reasoningEffort) {
+                    ForEach(LLMSettings.reasoningEffortOptions, id: \.self) { option in
+                        Text(option.isEmpty ? t("Service default") : option).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+            Text(t("Sonor sends this as `reasoning_effort`. A model without reasoning ignores it. A high effort makes the model think longer before it answers."))
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var keyRow: some View {
         row(title: t("API Key")) {
             SecureField(t("Optional for local servers"), text: $settings.apiKey)
@@ -103,6 +123,13 @@ struct LLMAPICard: View {
 
             statusLabel
         }
+    }
+
+    private var testNote: some View {
+        Text(t("The test runs one small rewrite with the settings above, so the times match real dictation. A high reasoning effort makes the test slow."))
+            .font(.system(size: 11))
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var testButtonLabel: some View {
@@ -138,8 +165,8 @@ struct LLMAPICard: View {
             }
         case .testing:
             EmptyView()
-        case .success:
-            message(text: t("Connection works."), systemImage: "checkmark.circle.fill", color: .green)
+        case .success(let summary):
+            message(text: summary, systemImage: "checkmark.circle.fill", color: .green)
         case .failure(let error):
             message(text: error, systemImage: "xmark.circle.fill", color: .red)
         }
@@ -172,12 +199,20 @@ struct LLMAPICard: View {
         let service = RemoteLLMService(configuration: settings.configuration)
         Task { @MainActor in
             do {
-                try await service.verifyConnection()
+                let probe = try await service.probe()
                 llmManager.lastAPIError = nil
-                testState = .success
+                testState = .success(Self.summary(for: probe))
             } catch {
                 testState = .failure(error.localizedDescription)
             }
         }
+    }
+
+    /// Reads as: Connection works.  First reply 1.2 s · Total 3.4 s · 90 chars/s
+    private static func summary(for probe: RemoteLLMProbe) -> String {
+        let first = String(format: "%.1f", probe.timeToFirstToken)
+        let total = String(format: "%.1f", probe.totalTime)
+        let speed = String(format: "%.0f", probe.charactersPerSecond)
+        return "\(t("Connection works."))  \(t("First reply")) \(first) s · \(t("Total")) \(total) s · \(speed) \(t("chars/s"))"
     }
 }

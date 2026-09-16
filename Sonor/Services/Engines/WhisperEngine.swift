@@ -30,9 +30,12 @@ public class WhisperEngine: TranscriptionEngine {
         guard let context = context else {
             throw NSError(domain: "WhisperEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Model not prepared."])
         }
-        // whisper.cpp reads `initial_prompt` as free text, so the words arrive as one line.
-        // An `.en` build drops the language itself, so no check is needed here.
-        let initialPrompt = vocabularyHints.isEmpty ? nil : vocabularyHints.joined(separator: ", ")
+        // whisper.cpp reads `initial_prompt` as free text, so the seed and the words arrive as
+        // one line. An `.en` build drops the language itself, so no check is needed here.
+        var promptParts: [String] = []
+        if let seed = language.scriptSeedPrompt { promptParts.append(seed) }
+        if !vocabularyHints.isEmpty { promptParts.append(vocabularyHints.joined(separator: ", ")) }
+        let initialPrompt = promptParts.isEmpty ? nil : promptParts.joined(separator: " ")
         return await context.transcribe(audioSamples: audioSamples, language: language.whisperCode, initialPrompt: initialPrompt)
     }
     

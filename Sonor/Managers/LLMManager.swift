@@ -20,6 +20,33 @@ struct NativeHubDownloader: MLXLMCommon.Downloader {
 
 extension ChatSession: @unchecked @retroactive Sendable {}
 
+/// What one refinement pass produced.
+///
+/// A failed pass still carries the transcript, because losing the words the user spoke is worse
+/// than skipping the rewrite. The caller must still tell the user that the rewrite did not run.
+enum LLMRefinement {
+    case refined(String)
+    /// The model stopped at the output limit. The text is incomplete but usable.
+    case truncated(String)
+    case failed(transcript: String, message: String)
+
+    var text: String {
+        switch self {
+        case .refined(let text), .truncated(let text): return text
+        case .failed(let transcript, _): return transcript
+        }
+    }
+
+    /// A line for the user, or nil when the pass finished cleanly.
+    var problem: String? {
+        switch self {
+        case .refined: return nil
+        case .truncated: return t("The answer stopped at the output limit.")
+        case .failed(_, let message): return message
+        }
+    }
+}
+
 @MainActor
 final class LLMManager: ObservableObject {
     static let shared = LLMManager()
@@ -68,9 +95,9 @@ final class LLMManager: ObservableObject {
         activeModelLabel(for: nil)
     }
 
-    func cleanStream(text: String, systemPrompt: String, mode: VoiceMode? = nil, onToken: @escaping (String) -> Bool) async -> String {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return text }
-        if systemPrompt.isEmpty { return text }
+    func cleanStream(text: String, systemPrompt: String, mode: VoiceMode? = nil, onToken: @escaping (String) -> Bool) async -> LLMRefinement {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .refined(text) }
+        if systemPrompt.isEmpty { return .refined(text) }
 
         let selection = resolved(for: mode)
         switch selection.provider {
@@ -81,7 +108,7 @@ final class LLMManager: ObservableObject {
         }
     }
 
-    private func cleanStreamRemote(configuration: RemoteLLMConfiguration, text: String, systemPrompt: String, onToken: @escaping (String) -> Bool) async -> String {
+    private func cleanStreamRemote(configuration: RemoteLLMConfiguration, text: String, systemPrompt: String, onToken: @escaping (String) -> Bool) async -> LLMRefinement {
         let service = RemoteLLMService(configuration: configuration)
         ModelManager.shared.lastAssistantUsageTime = Date()
         do {
@@ -90,14 +117,15 @@ final class LLMManager: ObservableObject {
                 return onToken(token)
             }
             lastAPIError = nil
-            return result
+            return result.wasTruncated ? .truncated(result.text) : .refined(result.text)
         } catch {
-            lastAPIError = error.localizedDescription
-            return text
+            let message = error.localizedDescription
+            lastAPIError = message
+            return .failed(transcript: text, message: message)
         }
     }
 
-    private func cleanStreamLocal(text: String, systemPrompt: String, onToken: @escaping (String) -> Bool) async -> String {
+    private func cleanStreamLocal(text: String, systemPrompt: String, onToken: @escaping (String) -> Bool) async -> LLMRefinement {
         let prompt = "\(systemPrompt)\n\nTekst: \(text)"
         var fullText = ""
 
@@ -117,9 +145,9 @@ final class LLMManager: ObservableObject {
             }
             await session.clear()
             MLX.Memory.clearCache()
-            return fullText
+            return .refined(fullText)
         } catch {
-            return text
+            return .failed(transcript: text, message: error.localizedDescription)
         }
     }
 
