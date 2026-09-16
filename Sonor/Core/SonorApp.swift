@@ -39,6 +39,15 @@ struct SonorApp: App {
             // Should not reach here because WorkerProcess calls exit()
         }
 
+        // `UserDefaults.bool(forKey:)` reports false for a key that was never written, so a
+        // setting that starts switched on has to be registered before anything reads it.
+        UserDefaults.standard.register(defaults: [
+            "showTranscriptPanel": true,
+            "showLiveTranscript": false,
+            TranscriptionManager.previewModelKey: TranscriptionManager.defaultPreviewModelId,
+            TranscriptionLanguage.storageKey: TranscriptionLanguage.automaticCode
+        ])
+
         // Zmuszamy MediaControlService do wcześniejszej inicjalizacji, 
         // aby adapter MediaRemote zdążył się połączyć i pobrać stan zanim użyjemy nagrywania pierwszy raz
         _ = MediaControlService.shared
@@ -305,11 +314,19 @@ struct WorkerProcess {
         let repoId = args[repoIndex + 1]
         let audioPath = args[audioIndex + 1]
         
-        var language = "auto"
+        var language = TranscriptionLanguage.automatic
         if let langIndex = args.firstIndex(of: "--language"), langIndex + 1 < args.count {
-            language = args[langIndex + 1]
+            language = TranscriptionLanguage.named(args[langIndex + 1])
         }
-        
+
+        var vocabularyHints: [String] = []
+        if let vocabularyIndex = args.firstIndex(of: "--vocabulary"), vocabularyIndex + 1 < args.count,
+           let encoded = Data(base64Encoded: args[vocabularyIndex + 1]),
+           let decoded = try? JSONDecoder().decode([String].self, from: encoded) {
+            vocabularyHints = decoded
+        }
+
+
         do {
             let audioData = try Data(contentsOf: URL(fileURLWithPath: audioPath))
             let audioSamples = audioData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
@@ -321,7 +338,7 @@ struct WorkerProcess {
                     try await engine.prepare()
                     
                     // We call performTranscription directly (skipping the worker proxy check)
-                    let result = try await engine.performTranscription(audioSamples: audioSamples, language: language, initialPrompt: nil)
+                    let result = try await engine.performTranscription(audioSamples: audioSamples, language: language, vocabularyHints: vocabularyHints)
                     
                     let encoded = result.data(using: .utf8)?.base64EncodedString() ?? ""
                     print("SUCCESS:\(encoded)")

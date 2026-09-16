@@ -1,11 +1,19 @@
 #import "SonorWrapper.h"
 #import "sonor.h"
 #import <Metal/Metal.h>
+#include <atomic>
 
 @interface SonorWrapper () {
     struct sonor_context * ctx;
+    /// The live preview runs on the same context as the final transcription. When the user
+    /// stops talking, the preview must give the context back without waiting for its result.
+    std::atomic<bool> abortRequested;
 }
 @end
+
+static bool sonor_wrapper_should_abort(void * userData) {
+    return ((std::atomic<bool> *) userData)->load(std::memory_order_relaxed);
+}
 
 @implementation SonorWrapper
 
@@ -25,6 +33,8 @@
             }
         }
         
+        abortRequested.store(false, std::memory_order_relaxed);
+
         struct sonor_context_params cparams = sonor_context_default_params();
         cparams.use_gpu = use_gpu;
         
@@ -42,9 +52,16 @@
     }
 }
 
+- (void)requestAbort {
+    abortRequested.store(true, std::memory_order_relaxed);
+}
+
 - (NSString *)transcribeAudioBuffer:(float *)samples count:(int)count language:(NSString *)language initialPrompt:(NSString *)initialPrompt {
     if (!ctx) return @"";
-    
+
+    // A request that arrived between two transcriptions must not stop this one.
+    abortRequested.store(false, std::memory_order_relaxed);
+
     struct sonor_full_params params = sonor_full_default_params(SONOR_SAMPLING_GREEDY);
     params.print_progress   = false;
     params.print_special    = false;
@@ -65,6 +82,9 @@
     params.n_threads        = 4;
     params.offset_ms        = 0;
     params.no_context       = true;
+
+    params.abort_callback           = sonor_wrapper_should_abort;
+    params.abort_callback_user_data = &abortRequested;
     
     int ret = sonor_full(ctx, params, samples, count);
     

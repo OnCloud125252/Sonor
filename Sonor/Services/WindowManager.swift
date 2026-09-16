@@ -39,7 +39,7 @@ class WindowManager: NSObject, NSWindowDelegate {
         
         if hudWindow == nil {
             let panel = SonorHUDPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 350, height: 600),
+                contentRect: NSRect(x: 0, y: 0, width: HUDMetrics.windowWidth, height: 600),
                 styleMask: [.nonactivatingPanel, .borderless],
                 backing: .buffered,
                 defer: false
@@ -53,7 +53,7 @@ class WindowManager: NSObject, NSWindowDelegate {
             panel.animationBehavior = .none
             panel.appearance = NSAppearance(named: .darkAqua)
             if let screen = NSScreen.main {
-                let defaultX = (screen.frame.width - 350) / 2
+                let defaultX = (screen.frame.width - HUDMetrics.windowWidth) / 2
                 let defaultY: CGFloat = 100
                 let savedX = UserDefaults.standard.object(forKey: "hudWindowX") as? CGFloat ?? defaultX
                 let savedY = UserDefaults.standard.object(forKey: "hudWindowY") as? CGFloat ?? defaultY
@@ -61,7 +61,7 @@ class WindowManager: NSObject, NSWindowDelegate {
                 let modeStr = UserDefaults.standard.string(forKey: "hudPositionMode") ?? "free"
                 let mode = HUDPositionMode(rawValue: modeStr) ?? .free
                 
-                let currentPanelWidth: CGFloat = 350
+                let currentPanelWidth: CGFloat = HUDMetrics.windowWidth
                 panel.setContentSize(NSSize(width: currentPanelWidth, height: 600))
                 
                 let leftMargin: CGFloat = 33
@@ -108,7 +108,7 @@ class WindowManager: NSObject, NSWindowDelegate {
         guard let panel = self.hudWindow, let screen = panel.screen ?? NSScreen.main else { return }
         
         let screenFrame = screen.visibleFrame
-        let panelWidth: CGFloat = 350
+        let panelWidth: CGFloat = HUDMetrics.windowWidth
         panel.setContentSize(NSSize(width: panelWidth, height: 600))
         let visibleHeight: CGFloat = 88 // estimated height for positioning
         

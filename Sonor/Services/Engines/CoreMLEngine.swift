@@ -21,7 +21,7 @@ public class CoreMLEngine: TranscriptionEngine {
         self.isLoaded = true
     }
     
-    public func transcribe(audioSamples: [Float], language: String, initialPrompt: String?) async throws -> String {
+    public func transcribe(audioSamples: [Float], language: TranscriptionLanguage, vocabularyHints: [String]) async throws -> String {
         guard isLoaded else {
             throw NSError(domain: "CoreMLEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Model not prepared."])
         }

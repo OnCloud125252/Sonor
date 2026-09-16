@@ -119,6 +119,238 @@ public class LocalizationManager: ObservableObject {
             "Posição da sobreposição",
             "覆盖层位置"
         ],
+        "Reading your voice": [
+            "Reading your voice", "Odczytuję głos", "Stimme wird gelesen", "Leyendo su voz", "Lecture de votre voix", "Leggo la tua voce", "音声を読み取り中", "Lendo sua voz", "正在读取语音"
+        ],
+        "Typing it out": [
+            "Typing it out", "Wpisuję tekst", "Text wird eingetippt", "Escribiendo el texto", "Saisie du texte", "Scrivo il testo", "入力中", "Digitando o texto", "正在输入文字"
+        ],
+        "Improving the text": [
+            "Improving the text", "Poprawiam tekst", "Text wird verbessert", "Mejorando el texto", "Amélioration du texte", "Miglioro il testo", "文章を整えています", "Melhorando o texto", "正在修润文字"
+        ],
+        "Pasted": [
+            "Pasted", "Wklejone", "Eingefügt", "Pegado", "Collé", "Incollato", "貼り付けました", "Colado", "已贴上"
+        ],
+        "Heard nothing": [
+            "Heard nothing", "Nic nie usłyszałem", "Nichts gehört", "No oí nada", "Rien entendu", "Non ho sentito nulla", "何も聞こえません", "Não ouvi nada", "没有听到内容"
+        ],
+        "Stopped": [
+            "Stopped", "Zatrzymane", "Gestoppt", "Detenido", "Arrêté", "Interrotto", "停止しました", "Parado", "已停止"
+        ],
+        "Could not read it": [
+            "Could not read it", "Nie udało się odczytać", "Konnte es nicht lesen", "No se pudo leer", "Lecture impossible", "Non sono riuscito a leggerlo", "読み取れませんでした", "Não foi possível ler", "无法识别"
+        ],
+        "No model installed": [
+            "No model installed", "Brak zainstalowanego modelu", "Kein Modell installiert", "No hay modelo instalado", "Aucun modèle installé", "Nessun modello installato", "モデルがありません", "Nenhum modelo instalado", "未安装模型"
+        ],
+        "No microphone access": [
+            "No microphone access", "Brak dostępu do mikrofonu", "Kein Mikrofonzugriff", "Sin acceso al micrófono", "Pas d'accès au microphone", "Nessun accesso al microfono", "マイクにアクセスできません", "Sem acesso ao microfone", "无麦克风权限"
+        ],
+        "Microphone problem": [
+            "Microphone problem", "Problem z mikrofonem", "Mikrofonproblem", "Problema del micrófono", "Problème de microphone", "Problema del microfono", "マイクの問題", "Problema no microfone", "麦克风出错"
+        ],
+        "Waking the assistant": [
+            "Waking the assistant", "Budzę asystenta", "Assistent wird geweckt", "Activando el asistente", "Réveil de l'assistant", "Sto avviando l'assistente", "アシスタントを起動中", "Acordando o assistente", "正在唤醒助手"
+        ],
+        "Loading the model": [
+            "Loading the model", "Ładuję model", "Modell wird geladen", "Cargando el modelo", "Chargement du modèle", "Carico il modello", "モデルを読み込み中", "Carregando o modelo", "正在载入模型"
+        ],
+        "Overlay Layout": [
+            "Overlay Layout",
+            "Układ nakładki",
+            "Overlay-Anordnung",
+            "Diseño de la superposición",
+            "Disposition de la superposition",
+            "Disposizione dell'overlay",
+            "オーバーレイの配置",
+            "Layout da sobreposição",
+            "覆盖层布局"
+        ],
+        "Arrangement": [
+            "Arrangement", "Układ", "Anordnung", "Disposición", "Disposition", "Disposizione", "配置", "Disposição", "布局"
+        ],
+        "One column": [
+            "One column", "Jedna kolumna", "Eine Spalte", "Una columna", "Une colonne", "Una colonna", "1 列", "Uma coluna", "单栏"
+        ],
+        "Controls on both sides": [
+            "Controls on both sides",
+            "Przyciski po obu stronach",
+            "Bedienelemente an beiden Seiten",
+            "Controles a ambos lados",
+            "Commandes des deux côtés",
+            "Comandi su entrambi i lati",
+            "両側に操作ボタン",
+            "Controles dos dois lados",
+            "控制鍵分置左右"
+        ],
+        "One column keeps the overlay narrow. Controls on both sides makes it wider and gives the text more room.": [
+            "One column keeps the overlay narrow. Controls on both sides makes it wider and gives the text more room.",
+            "Jedna kolumna utrzymuje wąską nakładkę. Przyciski po bokach poszerzają ją i dają więcej miejsca na tekst.",
+            "Eine Spalte hält das Overlay schmal. Bedienelemente an den Seiten machen es breiter und geben dem Text mehr Platz.",
+            "Una columna mantiene estrecha la superposición. Los controles a los lados la ensanchan y dan más espacio al texto.",
+            "Une colonne garde la superposition étroite. Les commandes sur les côtés l'élargissent et donnent plus de place au texte.",
+            "Una colonna mantiene stretto l'overlay. I comandi ai lati lo allargano e danno più spazio al testo.",
+            "1 列は幅を狭く保ちます。両側に操作ボタンを置くと幅が広がり、文字の場所が増えます。",
+            "Uma coluna mantém a sobreposição estreita. Os controles nos lados a alargam e dão mais espaço ao texto.",
+            "单栏让覆盖层保持窄小。控制鍵分置左右会加宽，文字空间更多。"
+        ],
+        "Preview model": [
+            "Preview model",
+            "Model podglądu",
+            "Vorschau-Modell",
+            "Modelo de vista previa",
+            "Modèle d'aperçu",
+            "Modello di anteprima",
+            "プレビュー用モデル",
+            "Modelo de pré-visualização",
+            "预览模型"
+        ],
+        "Off": [
+            "Off", "Wyłączone", "Aus", "Desactivado", "Désactivé", "Disattivato", "オフ", "Desligado", "关闭"
+        ],
+        "A small model keeps up with your voice. The final text always comes from the model you picked in Models, never from this one.": [
+            "A small model keeps up with your voice. The final text always comes from the model you picked in Models, never from this one.",
+            "Mały model nadąża za głosem. Tekst końcowy zawsze pochodzi z modelu wybranego w Modelach, nigdy z tego.",
+            "Ein kleines Modell hält mit Ihrer Stimme Schritt. Der Endtext kommt immer aus dem Modell, das Sie unter Modelle gewählt haben.",
+            "Un modelo pequeño sigue el ritmo de su voz. El texto final siempre viene del modelo elegido en Modelos, nunca de este.",
+            "Un petit modèle suit votre voix. Le texte final vient toujours du modèle choisi dans Modèles, jamais de celui-ci.",
+            "Un modello piccolo sta al passo con la tua voce. Il testo finale viene sempre dal modello scelto in Modelli, mai da questo.",
+            "小さいモデルなら声に追いつきます。最終的な文字は常に「モデル」で選んだモデルが作ります。",
+            "Um modelo pequeno acompanha a sua voz. O texto final vem sempre do modelo escolhido em Modelos, nunca deste.",
+            "小模型能跟上说话速度。最终文字始终由你在「模型」中选的模型产生，不是这个。"
+        ],
+        "Download Whisper Base (Multilingual) in Models to use the live preview.": [
+            "Download Whisper Base (Multilingual) in Models to use the live preview.",
+            "Pobierz Whisper Base (Multilingual) w Modelach, aby używać podglądu na żywo.",
+            "Laden Sie Whisper Base (Multilingual) unter Modelle, um die Live-Vorschau zu nutzen.",
+            "Descargue Whisper Base (Multilingual) en Modelos para usar la vista previa en vivo.",
+            "Téléchargez Whisper Base (Multilingual) dans Modèles pour utiliser l'aperçu en direct.",
+            "Scarica Whisper Base (Multilingual) in Modelli per usare l'anteprima dal vivo.",
+            "ライブプレビューを使うには、「モデル」で Whisper Base (Multilingual) をダウンロードしてください。",
+            "Baixe o Whisper Base (Multilingual) em Modelos para usar a pré-visualização ao vivo.",
+            "请先在「模型」中下载 Whisper Base (Multilingual)，才能使用即时预览。"
+        ],
+        "Microphone Sensitivity": [
+            "Microphone Sensitivity",
+            "Czułość mikrofonu",
+            "Mikrofon-Empfindlichkeit",
+            "Sensibilidad del micrófono",
+            "Sensibilité du microphone",
+            "Sensibilità del microfono",
+            "マイクの感度",
+            "Sensibilidade do microfone",
+            "麦克风灵敏度"
+        ],
+        "Set the level by hand": [
+            "Set the level by hand",
+            "Ustaw poziom ręcznie",
+            "Pegel von Hand einstellen",
+            "Ajustar el nivel a mano",
+            "Régler le niveau à la main",
+            "Imposta il livello a mano",
+            "レベルを手動で設定",
+            "Definir o nível manualmente",
+            "手动设定灵敏度"
+        ],
+        "Sonor follows the room and moves the mark for you. Speak to see where it sits.": [
+            "Sonor follows the room and moves the mark for you. Speak to see where it sits.",
+            "Sonor śledzi otoczenie i sam przesuwa znacznik. Powiedz coś, aby zobaczyć jego pozycję.",
+            "Sonor folgt dem Raum und verschiebt die Marke selbst. Sprechen Sie, um ihre Lage zu sehen.",
+            "Sonor sigue la sala y mueve la marca por usted. Hable para ver dónde queda.",
+            "Sonor suit la pièce et déplace le repère pour vous. Parlez pour voir sa position.",
+            "Sonor segue la stanza e sposta il segno al posto tuo. Parla per vedere dove si trova.",
+            "Sonor は部屋の音に合わせて目安を動かします。話して位置を確かめてください。",
+            "O Sonor segue a sala e move a marca por você. Fale para ver onde ela fica.",
+            "Sonor 会跟随环境噪音自动移动标记。说话即可看到它的位置。"
+        ],
+        "Drag the mark. A sound left of the mark counts as room noise. A sound right of it counts as a voice.": [
+            "Drag the mark. A sound left of the mark counts as room noise. A sound right of it counts as a voice.",
+            "Przeciągnij znacznik. Dźwięk na lewo od niego to szum otoczenia, a na prawo to głos.",
+            "Ziehen Sie die Marke. Ein Ton links davon gilt als Raumgeräusch, rechts davon als Stimme.",
+            "Arrastre la marca. Un sonido a su izquierda cuenta como ruido de sala. A su derecha cuenta como voz.",
+            "Faites glisser le repère. Un son à sa gauche compte comme bruit de la pièce, à sa droite comme une voix.",
+            "Trascina il segno. Un suono alla sua sinistra vale come rumore della stanza, alla sua destra come voce.",
+            "目安をドラッグします。左側の音は雑音、右側の音は声として扱います。",
+            "Arraste a marca. Um som à esquerda dela conta como ruído da sala. À direita conta como voz.",
+            "拖动标记。标记左边的声音算环境噪音，右边的算人声。"
+        ],
+        "Sonor hears a voice": [
+            "Sonor hears a voice",
+            "Sonor słyszy głos",
+            "Sonor hört eine Stimme",
+            "Sonor oye una voz",
+            "Sonor entend une voix",
+            "Sonor sente una voce",
+            "Sonor が声を検出しています",
+            "O Sonor ouve uma voz",
+            "Sonor 听到人声"
+        ],
+        "Sonor hears the room": [
+            "Sonor hears the room",
+            "Sonor słyszy tylko otoczenie",
+            "Sonor hört nur den Raum",
+            "Sonor solo oye la sala",
+            "Sonor n'entend que la pièce",
+            "Sonor sente solo la stanza",
+            "Sonor には雑音だけが聞こえています",
+            "O Sonor ouve apenas a sala",
+            "Sonor 只听到环境噪音"
+        ],
+        "Transcript Panel": [
+            "Transcript Panel",
+            "Panel transkrypcji",
+            "Transkript-Panel",
+            "Panel de transcripción",
+            "Panneau de transcription",
+            "Pannello della trascrizione",
+            "文字起こしパネル",
+            "Painel de transcrição",
+            "转写面板"
+        ],
+        "Show the text above the overlay": [
+            "Show the text above the overlay",
+            "Pokaż tekst nad nakładką",
+            "Text über dem Overlay anzeigen",
+            "Mostrar el texto encima de la superposición",
+            "Afficher le texte au-dessus de la superposition",
+            "Mostra il testo sopra l'overlay",
+            "オーバーレイの上にテキストを表示",
+            "Mostrar o texto acima da sobreposição",
+            "在覆盖层上方显示文本"
+        ],
+        "The panel shows what you dictated. Words the assistant removed are red and crossed out. Words it added are green.": [
+            "The panel shows what you dictated. Words the assistant removed are red and crossed out. Words it added are green.",
+            "Panel pokazuje podyktowany tekst. Słowa usunięte przez asystenta są czerwone i przekreślone. Słowa dodane są zielone.",
+            "Das Panel zeigt Ihren diktierten Text. Vom Assistenten entfernte Wörter sind rot und durchgestrichen. Hinzugefügte Wörter sind grün.",
+            "El panel muestra lo que dictó. Las palabras que el asistente eliminó aparecen en rojo y tachadas. Las palabras que añadió aparecen en verde.",
+            "Le panneau affiche votre dictée. Les mots supprimés par l'assistant sont rouges et barrés. Les mots ajoutés sont verts.",
+            "Il pannello mostra ciò che hai dettato. Le parole rimosse dall'assistente sono rosse e barrate. Le parole aggiunte sono verdi.",
+            "パネルには口述したテキストが表示されます。アシスタントが削除した単語は赤い取り消し線で、追加した単語は緑で表示されます。",
+            "O painel mostra o que você ditou. As palavras removidas pelo assistente ficam vermelhas e riscadas. As palavras adicionadas ficam verdes.",
+            "面板显示你口述的文本。助手删除的词显示为红色删除线，新增的词显示为绿色。"
+        ],
+        "Show the words while you speak": [
+            "Show the words while you speak",
+            "Pokazuj słowa podczas mówienia",
+            "Wörter schon beim Sprechen anzeigen",
+            "Mostrar las palabras mientras hablas",
+            "Afficher les mots pendant que vous parlez",
+            "Mostra le parole mentre parli",
+            "話している間に単語を表示",
+            "Mostrar as palavras enquanto você fala",
+            "说话时实时显示文字"
+        ],
+        "The transcription model runs again and again while you speak. This uses more battery and can slow down older Macs.": [
+            "The transcription model runs again and again while you speak. This uses more battery and can slow down older Macs.",
+            "Model transkrypcji działa wielokrotnie podczas mówienia. Zużywa to więcej baterii i może spowolnić starsze Maki.",
+            "Das Transkriptionsmodell läuft beim Sprechen immer wieder. Das verbraucht mehr Akku und kann ältere Macs verlangsamen.",
+            "El modelo de transcripción se ejecuta una y otra vez mientras hablas. Esto consume más batería y puede ralentizar los Mac antiguos.",
+            "Le modèle de transcription s'exécute en continu pendant que vous parlez. Cela consomme plus de batterie et peut ralentir les Mac anciens.",
+            "Il modello di trascrizione viene eseguito di continuo mentre parli. Consuma più batteria e può rallentare i Mac più vecchi.",
+            "話している間、文字起こしモデルが繰り返し実行されます。バッテリーの消費が増え、古い Mac では動作が遅くなることがあります。",
+            "O modelo de transcrição é executado repetidamente enquanto você fala. Isso consome mais bateria e pode deixar Macs antigos mais lentos.",
+            "说话时转写模型会反复运行。这会更耗电，也可能让旧款 Mac 变慢。"
+        ],
         "Top": [
             "Top", "Góra", "Oben", "Arriba", "Haut", "Alto", "上", "Superior", "顶部"
         ],

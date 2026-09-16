@@ -167,7 +167,7 @@ struct ModesSettingsView: View {
             counter += 1
         }
         
-        let newMode = VoiceMode(name: finalName, prompt: "", boundAppBundleIDs: [], audioBehavior: .keep, assistantType: "dictation", language: "auto", fallbackBehavior: "overlay")
+        let newMode = VoiceMode(name: finalName, prompt: "", boundAppBundleIDs: [], audioBehavior: .keep, assistantType: "dictation", fallbackBehavior: "overlay")
         modes.append(newMode)
         persistModes()
         selectedModeID = newMode.id.uuidString

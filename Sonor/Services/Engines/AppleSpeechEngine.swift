@@ -6,10 +6,16 @@ import os
 public class AppleSpeechEngine: TranscriptionEngine {
     public let name: String = "Apple Speech (System)"
     
-    private var recognizer: SFSpeechRecognizer?
-    
+    private var systemRecognizer: SFSpeechRecognizer?
+
+    /// One recognizer per forced language.
+    ///
+    /// `SFSpeechRecognizer` binds its locale when it is created, so a language change needs a
+    /// new instance. Building one per recording would drop the on-device model each time.
+    private var localeRecognizers: [String: SFSpeechRecognizer] = [:]
+
     public var isReady: Bool {
-        return recognizer != nil
+        return systemRecognizer != nil
     }
     
     public init() {}
@@ -30,16 +36,31 @@ public class AppleSpeechEngine: TranscriptionEngine {
         }
         
         // Initialize recognizer with the default locale or let it automatically detect
-        self.recognizer = SFSpeechRecognizer()
-        if self.recognizer?.isAvailable == false {
+        self.systemRecognizer = SFSpeechRecognizer()
+        if self.systemRecognizer?.isAvailable == false {
             throw NSError(domain: "AppleSpeechEngine", code: 2, userInfo: [NSLocalizedDescriptionKey: "Speech recognizer is not available."])
         }
     }
-    
-    public func transcribe(audioSamples: [Float], language: String, initialPrompt: String?) async throws -> String {
-        guard let recognizer = recognizer else {
+
+    /// Returns the recognizer for the chosen language.
+    ///
+    /// Apple ships a fixed set of dictation locales. When the chosen one is missing, the system
+    /// recognizer still returns text, so Sonor falls back instead of losing the recording.
+    private func recognizer(for language: TranscriptionLanguage) throws -> SFSpeechRecognizer {
+        guard let systemRecognizer = systemRecognizer else {
             throw NSError(domain: "AppleSpeechEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: "Engine not prepared."])
         }
+        guard let locale = language.appleLocale else { return systemRecognizer }
+        if let cached = localeRecognizers[locale.identifier] { return cached }
+        guard let made = SFSpeechRecognizer(locale: locale), made.isAvailable else {
+            return systemRecognizer
+        }
+        localeRecognizers[locale.identifier] = made
+        return made
+    }
+
+    public func transcribe(audioSamples: [Float], language: TranscriptionLanguage, vocabularyHints: [String]) async throws -> String {
+        let recognizer = try recognizer(for: language)
         
         // Sonor provides 16kHz mono PCM Float arrays
         let sampleRate: Double = 16000.0
@@ -59,14 +80,12 @@ public class AppleSpeechEngine: TranscriptionEngine {
         }
         
         let request = SFSpeechAudioBufferRecognitionRequest()
+        // Apple biases the decoder toward these words. This is its version of an initial prompt.
+        request.contextualStrings = vocabularyHints
         request.append(buffer)
         request.endAudio()
-        
-        if language != "auto" {
-            // Note: In a full implementation, you would map language codes to Locale properly
-            // and instantiate a new SFSpeechRecognizer(locale:) if needed.
-        }
-        
+
+
         // SFSpeechRecognizer can report an error after a result, and it can stop without ever
         // sending a final result. Both cases must resume the continuation exactly once.
         let hasResumed = OSAllocatedUnfairLock(initialState: false)
@@ -110,6 +129,7 @@ public class AppleSpeechEngine: TranscriptionEngine {
     }
     
     public func unload() {
-        self.recognizer = nil
+        self.systemRecognizer = nil
+        self.localeRecognizers.removeAll()
     }
 }

@@ -11,6 +11,11 @@ public class SonorContext: ObservableObject, @unchecked Sendable {
         self.wrapper = SonorWrapper(modelPath: modelPath)
     }
     
+    /// Stops the running transcription. It returns an empty string soon after.
+    nonisolated public func requestAbort() {
+        wrapper?.requestAbort()
+    }
+
     public func transcribe(audioSamples: [Float], language: String = "auto", initialPrompt: String? = nil) async -> String {
         guard let wrapper = wrapper else { return "" }
         await MainActor.run {

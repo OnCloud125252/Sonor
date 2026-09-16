@@ -5,12 +5,17 @@ struct RichModelCard: View {
     let title: String
     let description: String
     let weight: String
-    let languages: String
+    let languageSupport: ModelLanguageSupport
+    /// A model that cannot be pinned to one language gets a warning, so the user learns why the
+    /// speech language setting does not reach it.
+    let canSelectLanguage: Bool
+    /// A model that reads no vocabulary hint gets the same warning, so the user learns why the
+    /// dictionary words do not help it.
+    let canUseInitialPrompt: Bool
     let accuracy: Double
     let speed: Double
     let company: String
     let parameters: String?
-    let supportedLanguagesList: [String]
     let state: DownloadState
     var progressText: String? = nil
     var isActive: Bool? = nil
@@ -51,7 +56,25 @@ struct RichModelCard: View {
             }
         }
         .sheet(isPresented: $showLanguageList) {
-            LanguageListView(languages: supportedLanguagesList)
+            LanguageListView(languages: languageSupport.names)
+        }
+    }
+
+    /// What this model cannot take from Sonor, written for the user.
+    ///
+    /// Returns nil when the model reads both the language and the vocabulary hint. The text
+    /// says what Sonor cannot send. It must not read as "your dictionary stops working",
+    /// because Sonor still corrects the finished text for every model.
+    private var limitationText: String? {
+        switch (canSelectLanguage, canUseInitialPrompt) {
+        case (true, true):
+            return nil
+        case (false, true):
+            return "Sonor cannot set the language for this model. It picks the language itself."
+        case (true, false):
+            return "Sonor cannot give this model your dictionary words while it listens. The dictionary still corrects the finished text."
+        case (false, false):
+            return "Sonor cannot set the language or send dictionary words to this model. It picks the language itself, and the dictionary still corrects the finished text."
         }
     }
 
@@ -73,6 +96,12 @@ struct RichModelCard: View {
                     .font(.system(size: 13))
                     .foregroundColor(.secondary)
                     .lineLimit(2)
+                if let limitation = limitationText {
+                    Label(t(limitation), systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Spacer()
 
@@ -256,7 +285,7 @@ struct RichModelCard: View {
             HStack(spacing: 4) {
                 Image(systemName: "globe")
                     .foregroundColor(.secondary)
-                Text(t("Languages") + ": " + t(languages))
+                Text(t("Languages") + ": " + t(languageSupport.label))
                     .foregroundColor(.secondary)
             }
             .font(.system(size: 12, weight: .medium))

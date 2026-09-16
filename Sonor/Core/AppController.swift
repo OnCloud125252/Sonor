@@ -9,7 +9,25 @@ import CoreAudio
 @MainActor
 final class AudioLevelStore: ObservableObject {
     static let barCapacity = 40
-    @Published private(set) var levels: [Float] = Array(repeating: 0.01, count: barCapacity)
+
+    /// Seconds between two bars.
+    static let tickSeconds: Double = 0.05
+    /// How long a bar takes to fall from full height to the floor once the sound stops.
+    ///
+    /// A bar that follows the microphone straight down drops to the floor between two
+    /// syllables, and even inside one word at every consonant. The waveform then reads as a
+    /// row of separate spikes instead of the shape of a voice.
+    static let releaseSeconds: Double = 0.28
+    static let releasePerTick = Float(tickSeconds / releaseSeconds)
+
+    /// The next bar value. It rises at once and falls at a fixed rate.
+    ///
+    /// A voice starts a syllable faster than it ends one, so the rise has to be immediate and
+    /// the fall has to be gentle. Audio meters have worked this way for decades.
+    static func nextValue(previous: Float, target: Float) -> Float {
+        max(target, previous - releasePerTick)
+    }
+    @Published private(set) var levels: [Float] = Array(repeating: 0, count: barCapacity)
 
     func append(_ level: Float) {
         levels.append(level)
@@ -19,7 +37,7 @@ final class AudioLevelStore: ObservableObject {
     }
 
     func reset() {
-        levels = Array(repeating: 0.01, count: Self.barCapacity)
+        levels = Array(repeating: 0, count: Self.barCapacity)
     }
 }
 
@@ -55,6 +73,10 @@ class AppController: NSObject, ObservableObject {
         return !isRecording && !nonProcessingStatuses.contains(statusText) && !statusText.hasPrefix("Mode:")
     }
     let audioLevelStore = AudioLevelStore()
+    let transcriptStore = TranscriptStore()
+    /// Mirrors `transcriptStore.hasContent`. The HUD reads this instead of the store, so that
+    /// live text redraws the panel alone.
+    @Published private(set) var isTranscriptPanelVisible = false
     @Published var availableModes: [VoiceMode] = []
     @Published var currentMode: VoiceMode? {
         didSet {
@@ -95,6 +117,9 @@ class AppController: NSObject, ObservableObject {
     
     override init() {
         super.init()
+        transcriptStore.onVisibilityChange = { [weak self] isVisible in
+            self?.isTranscriptPanelVisible = isVisible
+        }
         let modes = VoiceMode.loadAndMigrateModes()
         self.availableModes = modes
         // A launch always starts on the assistant chosen as the default.
@@ -307,6 +332,7 @@ class AppController: NSObject, ObservableObject {
             wasPopoverOpenBeforeRecording = isPopoverOpen
             
             self.statusText = "Listening..."
+            self.transcriptStore.startListening()
             WindowManager.shared.showHUD(controller: self)
             
             self.startRecordingProcess(selectedMode: selectedMode, sessionID: sessionID)
@@ -366,13 +392,20 @@ class AppController: NSObject, ObservableObject {
                     withAnimation(.easeInOut(duration: 0.3)) {
                         self.statusText = "Listening..."
                     }
+                    self.startLivePreviewIfEnabled()
                     Task { @MainActor in
+                        var barValue: Float = 0
                         while self.isRecording {
                             if !self.isPaused {
-                                let level = self.audioManager.currentLevel
-                                self.audioLevelStore.append(level.isFinite ? max(0.01, level) : 0.01)
+                                // The store holds bar heights, not raw readings. The mapping
+                                // belongs here, where the peak and the live threshold are, and
+                                // not in the view that draws 20 times a second.
+                                let level = self.audioManager.peakLevelSinceLastRead
+                                let target = level.isFinite ? Float(VoiceActivity.waveformValue(forLevel: level)) : 0
+                                barValue = AudioLevelStore.nextValue(previous: barValue, target: target)
+                                self.audioLevelStore.append(barValue)
                             }
-                            try? await Task.sleep(nanoseconds: 50_000_000)
+                            try? await Task.sleep(nanoseconds: UInt64(AudioLevelStore.tickSeconds * 1_000_000_000))
                         }
                         self.audioLevelStore.reset()
                     }
@@ -382,9 +415,25 @@ class AppController: NSObject, ObservableObject {
                     MediaControlService.shared.resumeMultimedia()
                     self.statusText = "Microphone error"
                     self.isRecording = false
+                    self.transcriptStore.clear()
                     self.hideHUDAfterDelay()
                 }
             }
+        }
+    }
+
+    /// Starts the live preview, when the user asked for it in the settings.
+    ///
+    /// The preview runs the transcription model again and again, so it costs battery. It stays
+    /// off until the user switches it on.
+    private func startLivePreviewIfEnabled() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: "showTranscriptPanel"),
+              defaults.bool(forKey: "showLiveTranscript"),
+              !TranscriptionManager.selectedPreviewModelId.isEmpty else { return }
+        TranscriptionManager.shared.warmPreviewEngine()
+        LivePreviewService.shared.start { [weak self] text in
+            self?.transcriptStore.updateLive(text)
         }
     }
 
@@ -423,6 +472,8 @@ class AppController: NSObject, ObservableObject {
         self.currentRecordingSessionID = nil
         self.lastRecordingStopTime = Date()
         statusText = "Cancelled"
+        LivePreviewService.shared.stop()
+        self.transcriptStore.clear()
         let taskToCancel = currentTask
         currentTask = nil
         taskToCancel?.cancel()
@@ -454,13 +505,15 @@ class AppController: NSObject, ObservableObject {
     }
 
     private func hideHUDAfterDelay() {
-        Task {
-            await MainActor.run {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    if !self.isRecording && self.activeDictionaryNotification == nil && self.activeCopyNotification == nil {
-                        self.statusText = "Ready"
-                        WindowManager.shared.hideHUD()
-                    }
+        // The transcript panel holds the HUD open a little longer, so the user can read the
+        // assistant edit before the overlay goes away.
+        let delay = transcriptStore.hasContent ? max(1.5, transcriptStore.activeLingerSeconds + 0.5) : 1.5
+        Task { @MainActor in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                if !self.isRecording && self.activeDictionaryNotification == nil && self.activeCopyNotification == nil {
+                    self.statusText = "Ready"
+                    self.transcriptStore.clear()
+                    WindowManager.shared.hideHUD()
                 }
             }
         }
@@ -474,6 +527,9 @@ class AppController: NSObject, ObservableObject {
         self.currentRecordingSessionID = nil
         self.lastRecordingStopTime = Date()
         statusText = "Processing"
+        LivePreviewService.shared.stop()
+        // A pass that lands after this point must not open the panel.
+        transcriptStore.stopListening()
         if !wasPopoverOpenBeforeRecording {
             isPopoverOpen = false
         }
@@ -497,19 +553,21 @@ class AppController: NSObject, ObservableObject {
             // Silence check removed to prevent falsely cancelling quiet microphones
             
             let selectedMode = await MainActor.run { return self.currentMode ?? VoiceMode.defaults.first! }
-            _ = selectedMode.language ?? "auto"
-            
+
             await self.processAudio(samples: samples, selectedMode: selectedMode)
         }
     }
     
     func processAudio(samples: [Float], selectedMode: VoiceMode, historyMessageID: UUID? = nil, isInlineRetry: Bool = false) async {
+        let dictionary = UserDefaults.standard.dictionary(forKey: "dictionaryEntries") as? [String: String] ?? [:]
         let snippets = UserDefaults.standard.dictionary(forKey: "snippetsEntries") as? [String: String] ?? [:]
-        let snippetKeys = Array(snippets.keys)
-        let initialPrompt = snippetKeys.isEmpty ? nil : snippetKeys.joined(separator: ", ")
-        
+        // A dictionary entry maps a wrong spelling to the right one, so the model should expect
+        // the right one. A snippet trigger is the word the user actually says, so it is the key.
+        let vocabularyHints = Array(dictionary.values) + Array(snippets.keys)
+        let language = TranscriptionLanguage.resolved(modeCode: selectedMode.language)
+
         do {
-            let transcribedText = try await TranscriptionManager.shared.transcribe(audioSamples: samples, language: "auto", initialPrompt: initialPrompt)
+            let transcribedText = try await TranscriptionManager.shared.transcribe(audioSamples: samples, language: language, vocabularyHints: vocabularyHints)
             
             if Task.isCancelled {
                 if !isInlineRetry {
@@ -521,7 +579,8 @@ class AppController: NSObject, ObservableObject {
             guard !rawText.isEmpty else {
                 if !isInlineRetry {
                     await MainActor.run { 
-                        self.statusText = "No text recognized." 
+                        self.statusText = "No text recognized."
+                        self.transcriptStore.clear()
                     }
                     await SoundPlayer.shared.playSound(named: "Error")
                     self.hideHUDAfterDelay()
@@ -533,6 +592,9 @@ class AppController: NSObject, ObservableObject {
             let correctedText = TextProcessingService.shared.applyCorrections(to: rawText)
             await MainActor.run {
                 self.lastTranscription = correctedText
+                if !isInlineRetry && UserDefaults.standard.bool(forKey: "showTranscriptPanel") {
+                    self.transcriptStore.showTranscript(correctedText)
+                }
             }
             await AssistantWorkflowService.shared.execute(
                 correctedText: correctedText,
@@ -554,9 +616,15 @@ class AppController: NSObject, ObservableObject {
                     if !isInlineRetry {
                         self.showCopyNotification(text: textToCopy)
                     }
+                },
+                onAssistantText: { text, isFinal in
+                    if !isInlineRetry {
+                        self.transcriptStore.updateAssistant(text, isFinal: isFinal)
+                    }
                 }
             )
             if !isInlineRetry {
+                self.transcriptStore.markFinished()
                 self.hideHUDAfterDelay()
             }
         } catch {
@@ -579,6 +647,7 @@ class AppController: NSObject, ObservableObject {
                         let llmModelLabel = LLMManager.shared.activeModelLabel(for: selectedMode)
                         let shouldRunLLM = !selectedMode.prompt.isEmpty
                         MessageMemoryManager.shared.updateMessage(id: historyMessageID, newText: t("Transcription failed"), isError: true, appName: appName, transcriptionModel: whisperModel, llmModel: shouldRunLLM ? llmModelLabel : nil, modeName: selectedMode.name, updateMetadata: true)
+                        self.transcriptStore.clear()
                         withAnimation(.spring(response: 0.5, dampingFraction: 0.6, blendDuration: 0.3)) {
                             self.statusText = "Transcription failed"
                             self.failedAudioSamples = samples
@@ -588,6 +657,7 @@ class AppController: NSObject, ObservableObject {
                     }
                 } else {
                     await MainActor.run {
+                        self.transcriptStore.clear()
                         withAnimation(.spring(response: 0.5, dampingFraction: 0.6, blendDuration: 0.3)) {
                             self.statusText = "Transcription failed"
                             self.failedAudioSamples = samples

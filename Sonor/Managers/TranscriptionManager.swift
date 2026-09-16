@@ -23,6 +23,29 @@ public class TranscriptionManager: ObservableObject {
     /// task handle belonging to a newer one.
     private var loadGeneration = 0
     public var modelOverrideId: String? = nil
+
+    /// A whisper or MLX context decodes one request at a time, so each call on the main engine
+    /// waits for the call before it.
+    private var engineGate: Task<Void, Never> = Task {}
+
+    /// The live preview runs on its own small model and its own context.
+    ///
+    /// A shared context would make the final transcription wait for the preview pass that is
+    /// running, and that pass can take seconds with a large model.
+    private var previewEngine: WhisperEngine?
+    private var previewEngineModelId: String?
+    private var previewLoadTask: Task<Void, Never>?
+    /// True only while a preview pass holds the main engine. `cancelPreview()` reads it so
+    /// that it can never stop the final transcription.
+    private var isSharedPreviewRunning = false
+
+    /// Key of the model the preview uses. Empty means the preview is switched off.
+    public static let previewModelKey = "previewWhisperModelId"
+    public static let defaultPreviewModelId = "base"
+
+    public static var selectedPreviewModelId: String {
+        UserDefaults.standard.string(forKey: previewModelKey) ?? defaultPreviewModelId
+    }
     
     public var activeModelName: String {
         if let override = modelOverrideId, override != "default" {
@@ -70,6 +93,8 @@ public class TranscriptionManager: ObservableObject {
     
     public func resetEngine() {
         // Stop current operations and free resources
+        activeEngine?.cancelCurrent()
+        releasePreviewEngine()
         loadGeneration += 1
         loadTask?.cancel()
         loadTask = nil
@@ -176,7 +201,7 @@ public class TranscriptionManager: ObservableObject {
         ModelManager.shared.lastTranscriptionUsageTime = Date()
     }
     
-    public func transcribe(audioSamples: [Float], language: String, initialPrompt: String?) async throws -> String {
+    public func transcribe(audioSamples: [Float], language: TranscriptionLanguage, vocabularyHints: [String]) async throws -> String {
         try await ensureEngineReady()
         ModelManager.shared.lastTranscriptionUsageTime = Date()
         
@@ -184,6 +209,111 @@ public class TranscriptionManager: ObservableObject {
             throw NSError(domain: "TranscriptionManager", code: 11, userInfo: [NSLocalizedDescriptionKey: "Failed to initialize active engine."])
         }
         
-        return try await engine.transcribe(audioSamples: audioSamples, language: language, initialPrompt: initialPrompt)
+        return try await serialized {
+            try await engine.transcribe(audioSamples: audioSamples, language: language, vocabularyHints: vocabularyHints)
+        }
+    }
+
+    /// The whisper model the final transcription will use, or nil when it uses another engine.
+    private var mainWhisperModelId: String? {
+        if let override = modelOverrideId, override != "default" {
+            return ModelManager.shared.availableWhisperModels.contains { $0.id == override } ? override : nil
+        }
+        return currentEngineType == .whisper ? ModelManager.shared.selectedWhisperModelId : nil
+    }
+
+    /// Loads the small preview model, if the user picked one and it sits on disk.
+    /// This runs beside the main model and never blocks it.
+    public func warmPreviewEngine() {
+        let modelId = Self.selectedPreviewModelId
+        guard !modelId.isEmpty else {
+            releasePreviewEngine()
+            return
+        }
+        // A second copy of the model the final transcription already holds would double its
+        // memory, and with a large model that is over a gigabyte. The preview shares that one
+        // instead, and takes its turn behind the final transcription.
+        guard modelId != mainWhisperModelId else {
+            releasePreviewEngine()
+            return
+        }
+        if previewEngineModelId == modelId, previewEngine?.isReady == true { return }
+        guard let url = ModelManager.shared.urlForWhisperModel(id: modelId),
+              FileManager.default.fileExists(atPath: url.path) else {
+            releasePreviewEngine()
+            return
+        }
+
+        releasePreviewEngine()
+        previewEngineModelId = modelId
+        let engine = WhisperEngine(modelPath: url.path)
+        previewEngine = engine
+        previewLoadTask = Task { [weak self] in
+            try? await engine.prepare()
+            if self?.previewEngineModelId != modelId {
+                engine.unload()
+            }
+        }
+    }
+
+    /// Reads the words captured so far, for the HUD preview.
+    ///
+    /// It returns nil until the preview model finished loading. A preview must never make the
+    /// user wait for anything.
+    public func transcribePreview(audioSamples: [Float]) async -> String? {
+        // The preview has no assistant, so it reads the global choice. A forced language makes
+        // the small model guess far less on short fragments.
+        if let engine = previewEngine, engine.isReady {
+            return try? await engine.transcribe(audioSamples: audioSamples, language: .global, vocabularyHints: [])
+        }
+
+        // The user picked the model the final transcription already uses, so there is one
+        // context and the two have to take turns on it.
+        guard Self.selectedPreviewModelId == mainWhisperModelId,
+              let engine = activeEngine, engine.isReady else { return nil }
+        return try? await serialized {
+            // The flag is raised inside the gate. Outside it the preview only waits for its
+            // turn, and a stop request then must not reach the final transcription.
+            self.isSharedPreviewRunning = true
+            defer { self.isSharedPreviewRunning = false }
+            return try await engine.transcribe(audioSamples: audioSamples, language: .global, vocabularyHints: [])
+        }
+    }
+
+    /// Stops the running preview pass.
+    ///
+    /// With its own model the preview runs on another context, so this only frees the graphics
+    /// processor sooner. With a shared model it also hands the context back to the final
+    /// transcription instead of making it wait.
+    public func cancelPreview() {
+        if previewEngine != nil {
+            previewEngine?.cancelCurrent()
+        } else if isSharedPreviewRunning {
+            activeEngine?.cancelCurrent()
+        }
+    }
+
+    public func releasePreviewEngine() {
+        previewLoadTask?.cancel()
+        previewLoadTask = nil
+        previewEngine?.cancelCurrent()
+        previewEngine?.unload()
+        previewEngine = nil
+        previewEngineModelId = nil
+    }
+
+    /// Runs `work` after every call that started before it.
+    private func serialized<T: Sendable>(_ work: @escaping @MainActor () async throws -> T) async throws -> T {
+        let previous = engineGate
+        let current = Task { @MainActor () -> Result<T, Error> in
+            await previous.value
+            do {
+                return .success(try await work())
+            } catch {
+                return .failure(error)
+            }
+        }
+        engineGate = Task { _ = await current.value }
+        return try await current.value.get()
     }
 }

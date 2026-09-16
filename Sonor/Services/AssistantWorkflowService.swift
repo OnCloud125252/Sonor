@@ -20,7 +20,10 @@ class AssistantWorkflowService {
         isBackgroundRetry: Bool = false,
         onStatusChange: @escaping @MainActor (String) -> Void,
         onAutoLearnTrigger: @escaping @MainActor (pid_t, String) -> Void,
-        onCopyNotificationTrigger: @escaping @MainActor (String) -> Void
+        onCopyNotificationTrigger: @escaping @MainActor (String) -> Void,
+        /// Reports the assistant output while it grows, so the HUD can draw the edit.
+        /// The second value is true only for the finished text.
+        onAssistantText: @escaping @MainActor (String, Bool) -> Void = { _, _ in }
     ) async {
         
         var frontmostPID = NSRunningApplication.current.processIdentifier
@@ -155,9 +158,21 @@ class AssistantWorkflowService {
             var fullGeneratedText = ""
             var streamedText = ""
             let initialWillPaste = willPaste
+            // One hop to the main actor per token would flood it. The panel only needs to
+            // keep up with the eye.
+            var lastPanelUpdate = CFAbsoluteTimeGetCurrent()
+            let panelUpdateInterval: CFAbsoluteTime = 0.1
             
             let llmResult = await LLMManager.shared.cleanStream(text: correctedText, systemPrompt: systemPrompt, mode: selectedMode) { token in
                 fullGeneratedText += token
+                let now = CFAbsoluteTimeGetCurrent()
+                if now - lastPanelUpdate >= panelUpdateInterval {
+                    lastPanelUpdate = now
+                    let snapshot = fullGeneratedText
+                    Task { @MainActor in
+                        onAssistantText(snapshot, false)
+                    }
+                }
                 if !didStartStreaming {
                     didStartStreaming = true
                     Task { @MainActor in
@@ -198,6 +213,11 @@ class AssistantWorkflowService {
             // The model produced nothing, for example when the API call failed. Keep the transcript.
             if fullGeneratedText.isEmpty {
                 fullGeneratedText = llmResult
+            }
+
+            let finishedText = fullGeneratedText
+            await MainActor.run {
+                onAssistantText(finishedText, true)
             }
             
             let finalPID = frontmostPID
@@ -366,8 +386,11 @@ class AssistantWorkflowService {
         finalBasePrompt = finalBasePrompt.replacingOccurrences(of: "CRITICAL: Detect the language of the input text and respond in the EXACT SAME language. Do not translate the text under any circumstances.", with: "")
         finalBasePrompt = finalBasePrompt.replacingOccurrences(of: "CRITICAL: Detect the language of the input text and respond in the EXACT SAME language. Reply ONLY with the final text, without any conversational filler, introductory, or concluding remarks.", with: "")
         
-        if let lang = selectedMode.language, lang != "auto" {
-            universalLanguageRule = "\n\nCRITICAL OVERRIDE: Regardless of ANY prior instructions or specific mode rules, you MUST translate and output the final text exclusively in \(lang). If any other language was requested earlier, IGNORE IT. Respond ONLY in \(lang)."
+        // The same choice drives the transcription model, so the assistant writes back in the
+        // language the user dictates in.
+        let language = TranscriptionLanguage.resolved(modeCode: selectedMode.language)
+        if !language.isAutomatic {
+            universalLanguageRule = "\n\nCRITICAL OVERRIDE: Regardless of ANY prior instructions or specific mode rules, you MUST translate and output the final text exclusively in \(language.englishName). If any other language was requested earlier, IGNORE IT. Respond ONLY in \(language.englishName)."
         } else if let detected = detectedLanguage, !detected.isEmpty {
             universalLanguageRule = "\n\nLANGUAGE ANCHOR (CRITICAL):\nRespond EXACTLY in the following language: \(detected).\nDo NOT translate the text into any other language under any circumstances. Process and output the text using ONLY \(detected)."
         } else {

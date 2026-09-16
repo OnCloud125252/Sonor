@@ -384,12 +384,41 @@ struct AudioLevelStoreTests {
         #expect(store.levels.last == 499)
     }
 
+    @Test func aBarRisesAtOnce() {
+        // A syllable starts fast. The bar has to be there on the very next draw.
+        #expect(AudioLevelStore.nextValue(previous: 0, target: 1) == 1)
+        #expect(AudioLevelStore.nextValue(previous: 0.2, target: 0.9) == 0.9)
+    }
+
+    @Test func aBarFallsSlowly() {
+        let next = AudioLevelStore.nextValue(previous: 1, target: 0)
+        #expect(next < 1)
+        #expect(next > 0.7)
+    }
+
+    @Test func aBarReachesTheFloorInTheReleaseTime() {
+        var value: Float = 1
+        let ticks = Int((AudioLevelStore.releaseSeconds / AudioLevelStore.tickSeconds).rounded(.up))
+        for _ in 0..<ticks {
+            value = AudioLevelStore.nextValue(previous: value, target: 0)
+        }
+        #expect(value == 0)
+    }
+
+    @Test func aShortGapDoesNotDropTheBarToTheFloor() {
+        // One quiet reading between two syllables used to cut the waveform into separate
+        // spikes. After 50 milliseconds of quiet the bar still stands.
+        let value = AudioLevelStore.nextValue(previous: 0.8, target: 0)
+        #expect(value > 0.5)
+    }
+
     @Test func resetRestoresTheBaseline() async throws {
         let store = AudioLevelStore()
         store.append(9.0)
         store.reset()
         #expect(store.levels.count == AudioLevelStore.barCapacity)
-        #expect(store.levels.allSatisfy { $0 == 0.01 })
+        // The store holds bar values from 0 to 1, so an empty waveform is a flat line.
+        #expect(store.levels.allSatisfy { $0 == 0 })
     }
 }
 
@@ -416,5 +445,568 @@ struct MediaListenerTests {
     @Test func aDisabledPausingAssistantDoesNotCount() {
         let modes = [mode("a", behavior: .keep), mode("b", behavior: .muteAndPause, enabled: false)]
         #expect(!MediaControlService.needsMediaListener(for: modes))
+    }
+}
+
+/// Guards the word diff that the HUD transcript panel draws.
+/// The panel must show exactly what the assistant changed, so a wrong merge would tell the
+/// user that untouched words were rewritten.
+struct TextDiffTests {
+
+    private func rendered(_ segments: [TextDiffSegment]) -> String {
+        segments.map { segment in
+            switch segment.kind {
+            case .kept: return segment.text
+            case .added: return "+[\(segment.text)]"
+            case .removed: return "-[\(segment.text)]"
+            }
+        }.joined(separator: " ")
+    }
+
+    @Test func identicalTextIsOneKeptRun() {
+        let segments = TextDiff.segments(from: "hello there world", to: "hello there world")
+        #expect(segments.count == 1)
+        #expect(segments[0].kind == .kept)
+        #expect(segments[0].text == "hello there world")
+    }
+
+    @Test func emptyTextMakesNoSegments() {
+        #expect(TextDiff.segments(from: "", to: "").isEmpty)
+    }
+
+    @Test func aReplacedWordShowsTheOldWordBeforeTheNewOne() {
+        let segments = TextDiff.segments(from: "send it fast", to: "send it quickly")
+        #expect(rendered(segments) == "send it -[fast] +[quickly]")
+    }
+
+    @Test func addedWordsAreMarkedAdded() {
+        let segments = TextDiff.segments(from: "please call me", to: "please call me back today")
+        #expect(rendered(segments) == "please call me +[back today]")
+    }
+
+    @Test func removedWordsAreMarkedRemoved() {
+        let segments = TextDiff.segments(from: "um so I think um yes", to: "so I think yes")
+        #expect(rendered(segments) == "-[um] so I think -[um] yes")
+    }
+
+    @Test func neighborWordsOfTheSameKindMergeIntoOneRun() {
+        let segments = TextDiff.segments(from: "a b c d", to: "a x y d")
+        #expect(rendered(segments) == "a -[b c] +[x y] d")
+        #expect(segments.count == 4)
+    }
+
+    @Test func segmentIdentifiersAreUniqueAndOrdered() {
+        let segments = TextDiff.segments(from: "one two three", to: "one four three")
+        #expect(segments.map(\.id) == Array(0..<segments.count))
+    }
+
+    @Test func writingTextDropsTheRedTailThatTheAssistantHasNotReached() {
+        // The assistant wrote two words of nine so far. The rest of the transcript is not
+        // deleted, it is simply not written yet, so it must stay plain.
+        let partial = TextDiff.partialSegments(from: "um so send it to mark tomorrow morning please", to: "Please send")
+        #expect(rendered(partial) == "-[um so] +[Please] send")
+
+        let more = TextDiff.partialSegments(from: "um so send it to mark tomorrow morning please", to: "Please send it to Mark")
+        #expect(rendered(more) == "-[um so] +[Please] send it to Mark")
+    }
+
+    @Test func theFinishedDiffStillShowsEveryRemovedWord() {
+        let final = TextDiff.segments(from: "um so send it to mark please", to: "Please send it to Mark.")
+        #expect(rendered(final) == "-[um so] +[Please] send it to Mark. -[please]")
+    }
+
+    @Test func trimmingKeepsTextThatEndsWithKeptOrAddedWords() {
+        let segments = TextDiff.segments(from: "one two", to: "one three")
+        #expect(TextDiff.trimmingTrailingRemovals(segments).count == segments.count)
+    }
+
+    @Test func aFixedCaseOrFixedPunctuationIsNotAnEdit() {
+        // The assistant capitalizes and adds a period in almost every sentence. Marking each
+        // one would paint the whole panel and hide the real changes.
+        let segments = TextDiff.segments(from: "send it to mark", to: "Send it to Mark.")
+        #expect(rendered(segments) == "Send it to Mark.")
+        #expect(segments.count == 1)
+        #expect(segments[0].kind == .kept)
+    }
+
+    @Test func theAssistantSpellingIsTheOneOnScreen() {
+        let segments = TextDiff.segments(from: "call mark now", to: "Call Mark now")
+        #expect(segments.map(\.text) == ["Call Mark now"])
+    }
+
+    // Chinese writes without spaces. One whole sentence as a single unit would mark every
+    // edit as a full rewrite, which is what the first version did.
+
+    @Test func chineseSplitsPerCharacter() {
+        let segments = TextDiff.segments(from: "這是我做的一個诶語音輸入法", to: "這是我做的一個語音輸入法")
+        #expect(rendered(segments) == "這是我做的一個 -[诶] 語音輸入法")
+    }
+
+    @Test func chineseKeepsMostOfTheSentencePlain() {
+        let segments = TextDiff.segments(from: "你好這是我做的軟體", to: "你好，這是我做的軟體。")
+        // Only punctuation moved, so nothing carries a mark.
+        #expect(segments.count == 1)
+        #expect(segments[0].kind == .kept)
+    }
+
+    @Test func chineseRunsJoinWithoutSpaces() {
+        let segments = TextDiff.segments(from: "我喜歡貓", to: "我喜歡狗")
+        #expect(rendered(segments) == "我喜歡 -[貓] +[狗]")
+        #expect(segments.allSatisfy { !$0.leadingSpace })
+    }
+
+    @Test func englishInsideChineseStaysOneWord() {
+        let words = TextDiff.words(in: "用 Swift 寫的")
+        #expect(words.map(\.text) == ["用", "Swift", "寫", "的"])
+        #expect(words[1].hasLeadingSpace)
+        #expect(words[2].hasLeadingSpace)
+        #expect(!words[3].hasLeadingSpace)
+    }
+
+    @Test func englishKeepsItsSpaces() {
+        let segments = TextDiff.segments(from: "send it fast", to: "send it now")
+        #expect(segments[0].text == "send it")
+        #expect(!segments[0].leadingSpace)
+        #expect(segments[1].leadingSpace)
+    }
+
+    @Test func englishRunsNeverTouchEachOther() {
+        // "Please" opens the new text, so it carries no space of its own. It still needs a
+        // gap after the removed words, or the two runs read as one word.
+        let segments = TextDiff.segments(from: "um so send it", to: "Please send it")
+        #expect(rendered(segments) == "-[um so] +[Please] send it")
+        #expect(segments[1].kind == .added)
+        #expect(segments[1].leadingSpace)
+    }
+
+    @Test func chineseRunsStillTouchEachOther() {
+        let segments = TextDiff.segments(from: "嗯這是軟體", to: "這是軟體")
+        #expect(segments.allSatisfy { !$0.leadingSpace })
+    }
+}
+
+/// Guards the settled part of the live preview text.
+/// The engine reads the whole window again on every pass, so the end of the text keeps moving.
+/// Only the part that two passes agree on may look final.
+struct LivePreviewStabilityTests {
+
+    @Test func theFirstPassSettlesNothing() {
+        #expect(TextDiff.stablePrefix("", "你好這是") == "")
+    }
+
+    @Test func twoEqualPassesSettleEverything() {
+        #expect(TextDiff.stablePrefix("你好這是", "你好這是") == "你好這是")
+    }
+
+    @Test func onlyTheAgreedOpeningSettles() {
+        #expect(TextDiff.stablePrefix("你好這是我做", "你好這是我想") == "你好這是我")
+    }
+
+    @Test func aGrowingPassSettlesTheOldPart() {
+        #expect(TextDiff.stablePrefix("hello there", "hello there world") == "hello there")
+    }
+
+    @Test func aHalfWrittenWordDoesNotSettle() {
+        // "wor" is not "world", so the last word stays unsettled instead of being cut in half.
+        #expect(TextDiff.stablePrefix("hello wor", "hello world") == "hello")
+    }
+
+    @Test func aMovedCommaDoesNotUnsettleTheWholeSentence() {
+        // The engine puts the comma in a new place on almost every pass. A strict test would
+        // then draw the whole sentence dim, which is what the first version did.
+        #expect(TextDiff.stablePrefix("你好這是我做的", "你好，這是我做的") == "你好，這是我做的")
+        #expect(TextDiff.stablePrefix("hello there", "Hello, there") == "Hello, there")
+    }
+}
+
+/// Guards the store behind the HUD transcript panel.
+/// The HUD holds itself open from the visibility callback, so a missed report would leave the
+/// overlay on screen forever, or hide the assistant edit before the user can read it.
+@MainActor
+struct TranscriptStoreTests {
+
+    @Test func aFreshStoreShowsNothing() {
+        let store = TranscriptStore()
+        #expect(store.stage == .hidden)
+        #expect(!store.hasContent)
+        #expect(!store.hasEdit)
+    }
+
+    @Test func listeningStaysEmptyUntilTheFirstWordsArrive() {
+        let store = TranscriptStore()
+        store.startListening()
+        #expect(store.stage == .listening)
+        #expect(!store.hasContent)
+
+        store.updateLive("hello there")
+        #expect(store.hasContent)
+        // The first pass has nothing to agree with, so every word is still moving.
+        #expect(store.liveSettledText.isEmpty)
+        #expect(store.liveMovingText == "hello there")
+
+        store.updateLive("hello there world")
+        #expect(store.liveSettledText == "hello there")
+        #expect(store.liveMovingText == " world")
+    }
+
+    @Test func stoppingSettlesEveryWordOnScreen() {
+        let store = TranscriptStore()
+        store.startListening()
+        store.updateLive("hello there")
+        store.updateLive("hello there world")
+        #expect(store.liveSettledText == "hello there")
+        #expect(store.liveMovingText == " world")
+
+        store.stopListening()
+        // No pass runs after the recording stops, so no word is still moving.
+        #expect(store.liveSettledText == "hello there world")
+        #expect(store.liveMovingText.isEmpty)
+        #expect(store.hasContent)
+    }
+
+    @Test func livePreviewCannotOverwriteTheFinalTranscript() {
+        let store = TranscriptStore()
+        store.startListening()
+        store.showTranscript("the final words")
+        store.updateLive("a late preview pass")
+
+        #expect(store.stage == .edited)
+        #expect(store.liveSettledText.isEmpty)
+        #expect(store.liveMovingText.isEmpty)
+        #expect(store.segments.map(\.text) == ["the final words"])
+    }
+
+    @Test func theTranscriptAloneCountsAsNoEdit() {
+        let store = TranscriptStore()
+        store.showTranscript("send it fast")
+        #expect(store.hasContent)
+        #expect(!store.hasEdit)
+    }
+
+    @Test func theAssistantOutputBecomesADiff() {
+        let store = TranscriptStore()
+        store.showTranscript("send it fast")
+        store.updateAssistant("Send it quickly.", isFinal: true)
+
+        #expect(store.hasEdit)
+        // "Send" only changed case, so it stays plain. Only the real word swap carries a mark.
+        #expect(store.segments.contains { $0.kind == .kept && $0.text == "Send it" })
+        #expect(store.segments.contains { $0.kind == .removed && $0.text == "fast" })
+        #expect(store.segments.contains { $0.kind == .added && $0.text == "quickly." })
+    }
+
+    @Test func partialAssistantOutputHidesTheWordsItHasNotReached() {
+        let store = TranscriptStore()
+        store.showTranscript("please call me back")
+        store.updateAssistant("please call", isFinal: false)
+        #expect(!store.segments.contains { $0.kind == .removed })
+
+        store.updateAssistant("please call", isFinal: true)
+        #expect(store.segments.contains { $0.kind == .removed && $0.text == "me back" })
+    }
+
+    @Test func theAssistantOutputIsIgnoredWhileTheUserStillSpeaks() {
+        let store = TranscriptStore()
+        store.startListening()
+        store.updateAssistant("anything", isFinal: true)
+        #expect(store.stage == .listening)
+        #expect(store.segments.isEmpty)
+    }
+
+    @Test func visibilityIsReportedOncePerChange() {
+        let store = TranscriptStore()
+        var reports: [Bool] = []
+        store.onVisibilityChange = { reports.append($0) }
+
+        store.startListening()
+        store.updateLive("one")
+        store.updateLive("one two")
+        store.showTranscript("one two")
+        store.updateAssistant("One two.", isFinal: true)
+        store.clear()
+
+        #expect(reports == [true, false])
+    }
+
+    @Test func clearingEmptiesEveryField() {
+        let store = TranscriptStore()
+        store.showTranscript("some words")
+        store.updateAssistant("Some words.", isFinal: true)
+        store.clear()
+
+        #expect(store.stage == .hidden)
+        #expect(store.segments.isEmpty)
+        #expect(store.liveSettledText.isEmpty)
+        #expect(store.liveMovingText.isEmpty)
+        #expect(!store.hasContent)
+    }
+
+    @Test func aFinishedPanelWithNoTextHidesAtOnce() {
+        let store = TranscriptStore()
+        store.startListening()
+        store.markFinished()
+        #expect(store.stage == .hidden)
+    }
+
+    @Test func aFinishedPanelWithTextWaitsForTheReader() async throws {
+        let store = TranscriptStore()
+        store.showTranscript("some words")
+        store.markFinished()
+        // The countdown runs for `lingerSeconds`, so the text is still there right after.
+        try await Task.sleep(for: .milliseconds(120))
+        #expect(store.hasContent)
+    }
+}
+
+/// Guards the order of the assistant stream reports.
+/// The stream reports from background tasks, so a partial report can arrive after the final
+/// one. The finished diff must win.
+@MainActor
+struct TranscriptStoreOrderTests {
+
+    @Test func aLatePartialReportCannotOverwriteTheFinishedDiff() {
+        let store = TranscriptStore()
+        store.showTranscript("please call me back")
+        store.updateAssistant("Please call me back.", isFinal: true)
+        let finished = store.segments
+
+        store.updateAssistant("Please call", isFinal: false)
+        #expect(store.segments == finished)
+    }
+
+    @Test func aNewDictationAcceptsTheAssistantAgain() {
+        let store = TranscriptStore()
+        store.showTranscript("one")
+        store.updateAssistant("One.", isFinal: true)
+
+        store.showTranscript("two words")
+        store.updateAssistant("Two sentences", isFinal: false)
+        #expect(store.segments.contains { $0.kind == .added && $0.text == "sentences" })
+    }
+}
+
+/// Guards the microphone sensitivity math.
+/// The meter maps a level to a bar position. A wrong map puts every normal voice in the first
+/// tenth of the bar, and the mark becomes impossible to set.
+struct VoiceActivityTests {
+
+    @Test func silenceSitsAtTheLeftEdge() {
+        #expect(VoiceActivity.meterValue(forLevel: 0) == 0)
+    }
+
+    @Test func fullScaleSitsAtTheRightEdge() {
+        #expect(VoiceActivity.meterValue(forLevel: 1.0) == 1.0)
+    }
+
+    @Test func aNormalVoiceSitsNearTheMiddle() {
+        // A speaking voice reads about 0.02. It has to land where a mark is easy to place.
+        let value = VoiceActivity.meterValue(forLevel: 0.02)
+        #expect(value > 0.3)
+        #expect(value < 0.6)
+    }
+
+    @Test func roomNoiseSitsWellLeftOfAVoice() {
+        #expect(VoiceActivity.meterValue(forLevel: 0.002) < VoiceActivity.meterValue(forLevel: 0.02))
+    }
+
+    @Test func theMapRunsBothWays() {
+        for value in [0.0, 0.25, 0.35, 0.5, 0.9, 1.0] {
+            let level = VoiceActivity.level(forMeterValue: value)
+            #expect(abs(VoiceActivity.meterValue(forLevel: level) - value) < 0.0001)
+        }
+    }
+
+    @Test func aMarkOutsideTheBarIsPulledBack() {
+        #expect(VoiceActivity.level(forMeterValue: -2) == VoiceActivity.level(forMeterValue: 0))
+        #expect(VoiceActivity.level(forMeterValue: 5) == VoiceActivity.level(forMeterValue: 1))
+    }
+
+    @Test func aManualMarkWinsOverTheRoom() {
+        let manual: Float = 0.05
+        #expect(VoiceActivity.threshold(manual: manual, noiseFloor: 0.2) == manual)
+    }
+
+    @Test func automaticModeFollowsTheRoom() {
+        let quiet = VoiceActivity.threshold(manual: nil, noiseFloor: 0.0001)
+        #expect(quiet == VoiceActivity.minimumLevel)
+
+        let loud = VoiceActivity.threshold(manual: nil, noiseFloor: 0.01)
+        #expect(loud == 0.01 * VoiceActivity.voiceOverNoise)
+    }
+
+    @Test func theSavedSettingReadsBackAsWritten() {
+        let defaults = UserDefaults(suiteName: "VoiceActivityTests")!
+        defaults.removePersistentDomain(forName: "VoiceActivityTests")
+        defer { defaults.removePersistentDomain(forName: "VoiceActivityTests") }
+
+        #expect(VoiceActivity.savedManualLevel(in: defaults) == nil)
+
+        defaults.set(VoiceActivity.Mode.manual.rawValue, forKey: VoiceActivity.modeKey)
+        defaults.set(0.5, forKey: VoiceActivity.levelKey)
+        let level = VoiceActivity.savedManualLevel(in: defaults)
+        #expect(level != nil)
+        #expect(abs(VoiceActivity.meterValue(forLevel: level ?? 0) - 0.5) < 0.0001)
+
+        defaults.set(VoiceActivity.Mode.automatic.rawValue, forKey: VoiceActivity.modeKey)
+        #expect(VoiceActivity.savedManualLevel(in: defaults) == nil)
+    }
+}
+
+/// Guards the waveform bar height.
+/// A straight line from level to height reached the top at about 0.11, which a normal speaking
+/// voice passes on every syllable. The waveform then stayed pinned for the whole sentence.
+struct WaveformBarTests {
+
+    @Test func anEmptyValueDrawsTheShortestBar() {
+        #expect(AudioWavesView.barHeight(for: 0) == AudioWavesView.minimumBarHeight)
+    }
+
+    @Test func aBarNeverTouchesTheGlass() {
+        for value in [Float(-1), 0, 0.5, 1.0, 4.0] {
+            let height = AudioWavesView.barHeight(for: value)
+            #expect(height >= AudioWavesView.minimumBarHeight)
+            #expect(height <= AudioWavesView.maximumBarHeight)
+        }
+        // The control line is 40 points tall. The tallest bar has to leave a margin.
+        #expect(AudioWavesView.maximumBarHeight < 40)
+    }
+}
+
+/// Guards the curve that turns a microphone reading into a bar height.
+/// A plain logarithm spent most of the bar on room noise, so the bars never fell to the floor
+/// between words, and it spent the rest on shouting, so one loud syllable spiked far above the
+/// others. Speech lives in the middle, and that is where the bar has to move.
+struct WaveformCurveTests {
+
+    private func level(decibels: Double) -> Float {
+        Float(pow(10, decibels / 20))
+    }
+
+    @Test func silenceIsFlat() {
+        #expect(VoiceActivity.waveformValue(forLevel: 0) == 0)
+    }
+
+    @Test func aQuietRoomStaysOnTheFloor() {
+        // Room noise reads about 0.001 to 0.003. It has to draw a line, not a bar.
+        #expect(VoiceActivity.waveformValue(forLevel: 0.001) < 0.02)
+        #expect(VoiceActivity.waveformValue(forLevel: 0.003) < 0.02)
+    }
+
+    @Test func aShoutDoesNotSpikeAboveTheRest() {
+        let loud = VoiceActivity.waveformValue(forLevel: 0.3)
+        let louder = VoiceActivity.waveformValue(forLevel: 0.9)
+        #expect(loud > 0.97)
+        #expect(louder - loud < 0.03)
+    }
+
+    @Test func normalSpeechUsesTheMovingPartOfTheBar() {
+        for reading in [Float(0.02), 0.04, 0.07] {
+            let value = VoiceActivity.waveformValue(forLevel: reading)
+            #expect(value > 0.15)
+            #expect(value < 0.95)
+        }
+    }
+
+    @Test func theCurveMovesMostInTheSpeechRange() {
+        func step(from start: Double, to end: Double) -> Double {
+            VoiceActivity.waveformValue(forLevel: level(decibels: end))
+                - VoiceActivity.waveformValue(forLevel: level(decibels: start))
+        }
+        // The same five decibels, measured low, in the middle, and high.
+        let quiet = step(from: -44, to: -39)
+        let middle = step(from: -31, to: -26)
+        let loud = step(from: -17, to: -12)
+
+        #expect(middle > quiet * 2)
+        #expect(middle > loud * 2)
+    }
+
+    @Test func louderNeverDrawsShorter() {
+        var previous: Double = -1
+        for reading in [Float(0), 0.001, 0.005, 0.02, 0.08, 0.3, 1.0] {
+            let value = VoiceActivity.waveformValue(forLevel: reading)
+            #expect(value >= previous)
+            previous = value
+        }
+    }
+}
+
+/// Guards the window the live preview reads.
+/// A speaker who stops to think used to push their own opening sentence out of the window,
+/// because the silence filled it. The words already on screen then disappeared.
+struct PreviewWindowTests {
+
+    private static let sampleRate = 16_000
+    private static let threshold: Float = 0.01
+
+    /// A run of loud samples. The value alternates so the RMS is the value itself.
+    private func speech(seconds: Double, level: Float = 0.2) -> [Float] {
+        let count = Int(seconds * Double(Self.sampleRate))
+        return (0..<count).map { $0.isMultiple(of: 2) ? level : -level }
+    }
+
+    private func silence(seconds: Double) -> [Float] {
+        [Float](repeating: 0, count: Int(seconds * Double(Self.sampleRate)))
+    }
+
+    private func loudCount(_ samples: [Float]) -> Int {
+        samples.filter { abs($0) > Self.threshold }.count
+    }
+
+    private func recent(_ samples: [Float], seconds: Double) -> [Float] {
+        AudioManager.recentSpeech(
+            in: samples,
+            maxCount: Int(seconds * Double(Self.sampleRate)),
+            sampleRate: Self.sampleRate,
+            threshold: Self.threshold
+        )
+    }
+
+    @Test func plainSpeechComesBackNewestFirstAndInOrder() {
+        // Ten seconds of speech, a four second window. Only the newest four seconds fit.
+        let result = recent(speech(seconds: 10), seconds: 4)
+        #expect(result.count <= 4 * Self.sampleRate)
+        #expect(result.count > 3 * Self.sampleRate)
+        #expect(loudCount(result) == result.count)
+    }
+
+    @Test func aLongPauseDoesNotPushOutTheOpeningWords() {
+        // Three seconds of speech, twelve seconds of thinking, three more seconds of speech.
+        // A plain "last ten seconds" window would hold the pause and one sentence only.
+        let samples = speech(seconds: 3) + silence(seconds: 12) + speech(seconds: 3)
+        let result = recent(samples, seconds: 10)
+
+        // Both sentences survive. Six seconds of speech is 96000 samples.
+        #expect(loudCount(result) > 5 * Self.sampleRate)
+        #expect(result.count < samples.count)
+    }
+
+    @Test func theGapNextToTheSpeechStays() {
+        // The model still has to hear where one sentence ends and the next begins.
+        let samples = speech(seconds: 1) + silence(seconds: 10) + speech(seconds: 1)
+        let result = recent(samples, seconds: 20)
+        let quiet = result.count - loudCount(result)
+
+        #expect(quiet > 0)
+        #expect(Double(quiet) < AudioManager.keptGapSeconds * 2 * Double(Self.sampleRate))
+    }
+
+    @Test func aShortGapIsLeftAlone() {
+        // A natural gap between two words is shorter than the kept length, so nothing is cut.
+        let samples = speech(seconds: 1) + silence(seconds: 0.3) + speech(seconds: 1)
+        let result = recent(samples, seconds: 20)
+        #expect(result.count == samples.count)
+    }
+
+    @Test func audioShorterThanTheWindowComesBackWhole() {
+        let samples = speech(seconds: 2)
+        let result = recent(samples, seconds: 30)
+        #expect(result.count == samples.count)
+    }
+
+    @Test func silenceAloneReturnsOnlyTheKeptGap() {
+        let result = recent(silence(seconds: 20), seconds: 10)
+        #expect(loudCount(result) == 0)
+        #expect(Double(result.count) <= AudioManager.keptGapSeconds * 2 * Double(Self.sampleRate))
     }
 }

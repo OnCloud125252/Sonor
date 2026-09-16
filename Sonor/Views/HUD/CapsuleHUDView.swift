@@ -10,12 +10,27 @@ struct AudioWavesView: View {
     let isPaused: Bool
     let textColor: Color
 
+    /// Shortest bar, drawn while the room is quiet.
+    static let minimumBarHeight: CGFloat = 3
+    /// Tallest bar. The capsule is 40 points tall, so this leaves a clear margin above and
+    /// below. Bars that reach 40 touch the glass and the waveform reads as a solid block.
+    static let maximumBarHeight: CGFloat = 24
+
+    /// Height of one bar from a value of 0 to 1.
+    ///
+    /// `AppController` already turned the microphone reading into that value, so the drawing
+    /// code does no audio math.
+    static func barHeight(for value: Float) -> CGFloat {
+        let clamped = CGFloat(min(1, max(0, value)))
+        return minimumBarHeight + clamped * (maximumBarHeight - minimumBarHeight)
+    }
+
     var body: some View {
         HStack(spacing: 2) {
             ForEach(Array(levelStore.levels.suffix(barCount).enumerated()), id: \.offset) { _, level in
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(isPaused ? textColor.opacity(0.4) : textColor)
-                    .frame(width: 3, height: min(CGFloat(2 + (level * 350)), 40))
+                    .frame(width: 3, height: AudioWavesView.barHeight(for: level))
             }
         }
     }
@@ -55,14 +70,33 @@ struct CapsuleHUDView: View {
         let text = controller.statusText
         return text == "Cancelled" || text == "Done!" || text == "No text recognized." || text == "Error: Missing model" || text == "No microphone permission" || text == "Microphone error" || text == "Ready"
     }
+    private var contentWidth: CGFloat { HUDMetrics.contentWidth }
+
+    private var showsPause: Bool {
+        showPauseButton && !isInitializing && !isFinalState
+    }
+    private var showsCancel: Bool {
+        !isInitializing && !isFinalState
+    }
+    private var showsSelector: Bool {
+        LLMManager.shared.isAvailable && !isInitializing && !isFinalState && controller.isRecording
+    }
+    /// Once the dictation lands, the card holds the answer. A capsule that only says "done"
+    /// beside it adds nothing.
+    private var showsOnlyTranscript: Bool {
+        isFinalState && controller.isTranscriptPanelVisible
+    }
+
+    /// The waveform takes whatever the other items on the line leave, so both edges of the
+    /// overlay line up with the text card above.
     private var targetWidth: CGFloat {
-        if isInitializing || isFinalState {
-            return 284.0
-        } else if controller.isRecording || controller.canRetryTranscription {
-            return 180.0
-        } else {
-            return 232.0
-        }
+        let step = HUDMetrics.roundControlWidth + HUDMetrics.controlGap
+        var taken: CGFloat = 0
+        if showsPause { taken += step }
+        if controller.canRetryTranscription { taken += step }
+        if showsCancel { taken += step }
+        if showsSelector { taken += HUDMetrics.assistantWidth + HUDMetrics.controlGap }
+        return max(120, contentWidth - taken)
     }
     @State private var showPauseButton = false
     @State private var width: CGFloat = 180
@@ -80,32 +114,39 @@ struct CapsuleHUDView: View {
     @State private var isUndone: Bool = false
     @State private var hoveredButton: String? = nil
 
-    private var assistantSelector: some View {
+    /// The assistant picker.
+    ///
+    /// It used to take a full width row of its own, which read as a second toolbar. It is now
+    /// a tag: in the row layout it shares the bottom line with the waveform, and in the stack
+    /// layout it only takes the width of its own name.
+    private func assistantSelector(width: CGFloat?, height: CGFloat) -> some View {
         Button(action: {
             if !dragTracker.isDragging { withAnimation { showList.toggle() } }
         }) {
-            HStack {
-                ZStack(alignment: .leading) {
-                    Text(t(controller.currentMode?.name ?? "Wybierz tryb"))
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.primary)
-                        .id(controller.currentMode?.id)
-                        .transition(.asymmetric(
-                            insertion: .move(edge: .bottom).combined(with: .opacity),
-                            removal: .move(edge: .top).combined(with: .opacity)
-                        ))
+            HStack(spacing: 6) {
+                Text(t(controller.currentMode?.name ?? "Wybierz tryb"))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: width == nil, vertical: false)
+                    .id(controller.currentMode?.id)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .move(edge: .top).combined(with: .opacity)
+                    ))
+                if width != nil {
+                    Spacer(minLength: 4)
                 }
-                Spacer()
                 Image(systemName: showList ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.primary.opacity(0.7))
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.primary.opacity(0.6))
             }
             .padding(.horizontal, 12)
-            .frame(width: 284, height: 40)
+            .frame(width: width, height: height)
             .contentShape(Rectangle())
-            .glass(cornerRadius: 20, colorScheme: effectiveColorScheme)
+            .glass(cornerRadius: height / 2, colorScheme: effectiveColorScheme)
         }
-                        .buttonStyle(NoAnimButtonStyle())
+        .buttonStyle(NoAnimButtonStyle())
         .focusable(false)
         .simultaneousGesture(dragGesture)
     }
@@ -115,7 +156,8 @@ struct CapsuleHUDView: View {
         return String(format: "%02d:%02d", minutes, seconds)
     }
     private var audioWavesView: some View {
-        let barCount = width > 200 ? 31 : 21
+        // Each bar takes 5 points. The rest of the capsule holds the padding and the timer.
+        let barCount = Int(max(15, min(64, (width - 90) / 5)))
         return HStack(spacing: 0) {
             Spacer()
                 .frame(width: 14)
@@ -125,8 +167,9 @@ struct CapsuleHUDView: View {
                 isPaused: controller.isPaused,
                 textColor: textColor
             )
-            Spacer()
-                .frame(width: 14)
+            // A flexible gap keeps the bars on the left and the timer on the right. A fixed
+            // gap let the whole group drift to the middle of a wide capsule.
+            Spacer(minLength: 14)
             if controller.isRecording {
                 Text(formatDuration(recordingDuration))
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
@@ -144,9 +187,33 @@ struct CapsuleHUDView: View {
         effectiveColorScheme == .dark ? .white : .black
     }
     
+    /// Turns the status into words a reader understands.
+    ///
+    /// `statusText` also drives app state, so the strings themselves cannot change. This maps
+    /// them for the screen only. "Streaming" and "Processing" describe the machine. The user
+    /// wants to know what is happening to their words.
+    private func statusLabel(_ status: String) -> String {
+        switch status {
+        case "Processing": return "Reading your voice"
+        case "Streaming": return "Typing it out"
+        case "Modifying": return "Improving the text"
+        case "Done!": return "Pasted"
+        case "No text recognized.": return "Heard nothing"
+        case "Cancelled": return "Stopped"
+        case "Transcription failed": return "Could not read it"
+        case "Error: Missing model": return "No model installed"
+        case "No microphone permission": return "No microphone access"
+        case "Microphone error": return "Microphone problem"
+        case "Initializing LLM Model...": return "Waking the assistant"
+        default:
+            if status.hasPrefix("Initializing") { return "Loading the model" }
+            return status
+        }
+    }
+
     private var loaderView: some View {
         HStack(spacing: 8) {
-            Text(t(controller.statusText))
+            Text(t(statusLabel(controller.statusText)))
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(textColor)
                 .lineLimit(1)
@@ -220,7 +287,7 @@ struct CapsuleHUDView: View {
                 .padding(4)
             }
         }
-        .frame(width: 284)
+        .frame(width: contentWidth)
         .frame(height: min(CGFloat(selectableModes.count) * 30 + 8, 200))
         .glass(cornerRadius: 12, opacity: 0.7, colorScheme: effectiveColorScheme)
         .transition(.asymmetric(
@@ -429,6 +496,107 @@ struct CapsuleHUDView: View {
             .simultaneousGesture(dragGesture)
         )
     }
+    private var transcriptPanel: some View {
+        TranscriptPanelView(store: controller.transcriptStore, colorScheme: effectiveColorScheme, width: contentWidth)
+            .simultaneousGesture(dragGesture)
+    }
+
+    @ViewBuilder
+    private func assistantTag(width: CGFloat?, height: CGFloat) -> some View {
+        if showsSelector {
+            assistantSelector(width: width, height: height)
+                .transition(.asymmetric(insertion: .offset(y: 20).combined(with: .opacity), removal: .offset(y: 20).combined(with: .opacity)))
+        }
+    }
+
+    private var mainCapsule: some View {
+        Button(action: {
+        }) {
+            ZStack {
+                if !isProcessing && !controller.statusText.hasPrefix("Initializing") {
+                    audioWavesView
+                        .transition(.asymmetric(insertion: .scale(scale: 0.8).combined(with: .opacity), removal: .scale(scale: 0.5).combined(with: .opacity)))
+                } else {
+                    loaderView
+                        .transition(.asymmetric(insertion: .scale(scale: 0.8).combined(with: .opacity), removal: .scale(scale: 0.5).combined(with: .opacity)))
+                }
+            }
+            .animation(.spring(response: 0.5, dampingFraction: 0.6, blendDuration: 0.3), value: isProcessing)
+            .animation(.spring(response: 0.5, dampingFraction: 0.6, blendDuration: 0.3), value: controller.statusText)
+            .frame(width: width, height: height)
+            .contentShape(Capsule())
+            .glass(cornerRadius: 20, colorScheme: effectiveColorScheme)
+        }
+        .buttonStyle(NoAnimButtonStyle())
+        .focusable(false)
+        .simultaneousGesture(dragGesture)
+    }
+
+    private func roundButton(_ systemName: String, size: CGFloat, weight: Font.Weight, action: @escaping () -> Void) -> some View {
+        Button(action: {
+            if !dragTracker.isDragging { action() }
+        }) {
+            Image(systemName: systemName)
+                .font(.system(size: size, weight: weight))
+                .foregroundColor(textColor)
+                .frame(width: 40, height: 40)
+                .contentShape(Rectangle())
+                .glass(cornerRadius: 20, colorScheme: effectiveColorScheme)
+        }
+        .buttonStyle(NoAnimButtonStyle())
+        .focusable(false)
+        .simultaneousGesture(dragGesture)
+        .transition(.asymmetric(insertion: .offset(x: -30).combined(with: .scale(scale: 0.1)).combined(with: .opacity), removal: .offset(x: -30).combined(with: .scale(scale: 0.1)).combined(with: .opacity)))
+    }
+
+    @ViewBuilder
+    private var pauseButton: some View {
+        if showPauseButton && !isInitializing && !isFinalState {
+            roundButton(controller.isPaused ? "play.fill" : "pause.fill", size: 14, weight: .medium) {
+                controller.togglePause()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var retryButton: some View {
+        if controller.canRetryTranscription {
+            roundButton("arrow.clockwise", size: 15, weight: .bold) {
+                controller.retryTranscription()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var cancelButton: some View {
+        if !isInitializing && !isFinalState {
+            roundButton("xmark", size: 15, weight: .medium) {
+                controller.cancelRecording()
+            }
+        }
+    }
+
+    /// The text card, and one control line under it.
+    ///
+    /// Order on the line: pause first, because play and pause belong on the left. The waveform
+    /// takes the room that is left. The assistant picker sits beside it. Cancel goes last, as
+    /// far from pause as the line allows, so a miss on one is never the other.
+    private var overlayLayout: some View {
+        VStack(spacing: 8) {
+            transcriptPanel
+            if !showsOnlyTranscript {
+                HStack(spacing: HUDMetrics.controlGap) {
+                    pauseButton
+                    retryButton
+                    mainCapsule
+                    assistantTag(width: HUDMetrics.assistantWidth, height: HUDMetrics.controlHeight)
+                    cancelButton
+                }
+            }
+        }
+        .frame(width: contentWidth)
+    }
+
     var body: some View {
         VStack(spacing: 8) {
             if showList {
@@ -442,90 +610,8 @@ struct CapsuleHUDView: View {
                     copyNotificationView
                         .zIndex(2)
                 } else {
-                    VStack(spacing: 8) {
-                        if LLMManager.shared.isAvailable {
-                            if !isInitializing && !isFinalState && controller.isRecording {
-                                assistantSelector
-                                    .transition(.asymmetric(insertion: .offset(y: 40).combined(with: .scale(scale: 0.1)).combined(with: .opacity), removal: .offset(y: 40).combined(with: .scale(scale: 0.1)).combined(with: .opacity)))
-                                    .zIndex(0)
-                            }
-                        }
-                        HStack(spacing: (isInitializing || isFinalState) ? -40 : 12) {
-                            Button(action: {
-                            }) {
-                                ZStack {
-                                    if !isProcessing && !controller.statusText.hasPrefix("Initializing") {
-                                        audioWavesView
-                                            .transition(.asymmetric(insertion: .scale(scale: 0.8).combined(with: .opacity), removal: .scale(scale: 0.5).combined(with: .opacity)))
-                                    } else {
-                                        loaderView
-                                            .transition(.asymmetric(insertion: .scale(scale: 0.8).combined(with: .opacity), removal: .scale(scale: 0.5).combined(with: .opacity)))
-                                    }
-                                }
-                                .animation(.spring(response: 0.5, dampingFraction: 0.6, blendDuration: 0.3), value: isProcessing)
-                                .animation(.spring(response: 0.5, dampingFraction: 0.6, blendDuration: 0.3), value: controller.statusText)
-                                .frame(width: width, height: height)
-                                .contentShape(Capsule())
-                                .glass(cornerRadius: 20, colorScheme: effectiveColorScheme)
-                            }
-                            .buttonStyle(NoAnimButtonStyle())
-                            .focusable(false)
-                            .simultaneousGesture(dragGesture)
-                            .zIndex(1)
-                            if showPauseButton && !isInitializing && !isFinalState {
-                                Button(action: {
-                                    if !dragTracker.isDragging { controller.togglePause() }
-                                }) {
-                                    Image(systemName: controller.isPaused ? "play.fill" : "pause.fill")
-                                        .font(.system(size: 14, weight: .medium))
-                                        .foregroundColor(textColor)
-                                        .frame(width: 40, height: 40)
-                                        .contentShape(Rectangle())
-                                        .glass(cornerRadius: 20, colorScheme: effectiveColorScheme)
-                                }
-                                .buttonStyle(NoAnimButtonStyle())
-                                .focusable(false)
-                                .simultaneousGesture(dragGesture)
-                                .transition(.asymmetric(insertion: .offset(x: -30).combined(with: .scale(scale: 0.1)).combined(with: .opacity), removal: .offset(x: -30).combined(with: .scale(scale: 0.1)).combined(with: .opacity)))
-                                .zIndex(0)
-                            }
-                            if controller.canRetryTranscription {
-                                Button(action: {
-                                    if !dragTracker.isDragging { controller.retryTranscription() }
-                                }) {
-                                    Image(systemName: "arrow.clockwise")
-                                        .font(.system(size: 15, weight: .bold))
-                                        .foregroundColor(textColor)
-                                        .frame(width: 40, height: 40)
-                                        .contentShape(Rectangle())
-                                        .glass(cornerRadius: 20, colorScheme: effectiveColorScheme)
-                                }
-                                .buttonStyle(NoAnimButtonStyle())
-                                .focusable(false)
-                                .simultaneousGesture(dragGesture)
-                                .transition(.asymmetric(insertion: .offset(x: -30).combined(with: .scale(scale: 0.1)).combined(with: .opacity), removal: .offset(x: -30).combined(with: .scale(scale: 0.1)).combined(with: .opacity)))
-                                .zIndex(0)
-                            }
-                            if !isInitializing && !isFinalState {
-                                Button(action: {
-                                    if !dragTracker.isDragging { controller.cancelRecording() }
-                                }) {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 15, weight: .medium))
-                                        .foregroundColor(textColor)
-                                        .frame(width: 40, height: 40)
-                                        .contentShape(Rectangle())
-                                        .glass(cornerRadius: 20, colorScheme: effectiveColorScheme)
-                                }
-                                .buttonStyle(NoAnimButtonStyle())
-                                .focusable(false)
-                                .simultaneousGesture(dragGesture)
-                                .transition(.asymmetric(insertion: .offset(x: -30).combined(with: .scale(scale: 0.1)).combined(with: .opacity), removal: .offset(x: -30).combined(with: .scale(scale: 0.1)).combined(with: .opacity)))
-                                .zIndex(0)
-                            }
-                        }
-                    }
-                    .padding(.bottom, 8)
+                    overlayLayout
+                        .padding(.bottom, 8)
                     .transition(.opacity.combined(with: .scale(scale: 0.95)))
                     .zIndex(1)
                 }
@@ -533,10 +619,13 @@ struct CapsuleHUDView: View {
             .animation(.spring(response: 0.4, dampingFraction: 0.8), value: controller.activeDictionaryNotification != nil)
             .animation(.spring(response: 0.4, dampingFraction: 0.8), value: controller.activeCopyNotification != nil)
         }
-        .frame(width: 350, height: 600, alignment: .bottom)
-        .opacity((isFinalState || !hasAppeared) && controller.activeDictionaryNotification == nil && controller.activeCopyNotification == nil ? 0.0 : 1.0)
+        .frame(width: HUDMetrics.windowWidth, height: 600, alignment: .bottom)
+        // A finished dictation normally fades the HUD out at once. The transcript panel keeps
+        // it on screen until the store empties itself, so the user can read the edit.
+        .opacity((isFinalState || !hasAppeared) && controller.activeDictionaryNotification == nil && controller.activeCopyNotification == nil && !controller.isTranscriptPanelVisible ? 0.0 : 1.0)
         .animation(.spring(response: 0.5, dampingFraction: 0.7), value: isFinalState)
         .animation(.spring(response: 0.5, dampingFraction: 0.7), value: hasAppeared)
+        .animation(.spring(response: 0.45, dampingFraction: 0.8), value: controller.isTranscriptPanelVisible)
         .animation(.spring(response: 0.5, dampingFraction: 0.7), value: controller.activeDictionaryNotification != nil)
         .animation(.spring(response: 0.5, dampingFraction: 0.7), value: controller.activeCopyNotification != nil)
         .colorScheme(effectiveColorScheme)
@@ -643,10 +732,12 @@ struct CapsuleHUDView: View {
                 if let screen = window.screen ?? NSScreen.main {
                     let screenFrame = screen.visibleFrame
                     let leftMargin: CGFloat = 33
-                    let rightMargin: CGFloat = 350 - leftMargin 
+                    let rightMargin: CGFloat = HUDMetrics.windowWidth - leftMargin
                     let minXBound = screenFrame.minX - leftMargin
                     let maxXBound = screenFrame.maxX - rightMargin
-                    let visibleHeight = showList ? CGFloat(296) : CGFloat(88)
+                    // The panel wraps to at most four lines, so this reserves its tallest size.
+                    let panelHeight: CGFloat = controller.isTranscriptPanelVisible ? 84 : 0
+                    let visibleHeight = (showList ? CGFloat(296) : CGFloat(88)) + panelHeight
                     let minYBound = screenFrame.minY - 8
                     let maxYBound = screenFrame.maxY - visibleHeight - 8
                     newX = max(minXBound, min(newX, maxXBound))

@@ -36,6 +36,19 @@ class AudioManager: ObservableObject {
         var isPaused = false
         var level: Float = 0
         var lastPublish: UInt64 = 0
+        /// Follows the quiet parts of the room, so the voice test works on any microphone gain.
+        var noiseFloor: Float = 0
+        /// Uptime in nanoseconds when the microphone last heard a voice.
+        var lastVoice: UInt64 = 0
+        /// The mark the user set on the meter. Nil means follow the room.
+        var manualThreshold: Float?
+        /// The level a voice has to beat right now. The settings meter draws it.
+        var threshold: Float = VoiceActivity.minimumLevel
+        var isHearingVoice = false
+        /// True while the microphone runs only to feed the settings meter.
+        var isMonitorOnly = false
+        /// Loudest reading since the waveform last looked.
+        var peak: Float = 0
     }
 
     /// Publishing `audioLevel` on every render callback costs a main-thread hop ~47x/sec.
@@ -50,6 +63,50 @@ class AudioManager: ObservableObject {
     /// Latest RMS level, safe to read from any thread.
     var currentLevel: Float {
         levelLock.withLock { $0.level }
+    }
+
+    /// Uptime in nanoseconds when the microphone last heard a voice. Zero means never.
+    ///
+    /// The live preview reads this. Without it the preview runs the transcription model again
+    /// and again on the same silent buffer, and the text on screen keeps changing by itself.
+    var lastVoiceUptime: UInt64 {
+        levelLock.withLock { $0.lastVoice }
+    }
+
+    /// The level a voice has to beat right now, and whether it beats it.
+    var voiceState: (threshold: Float, isHearingVoice: Bool) {
+        levelLock.withLock { ($0.threshold, $0.isHearingVoice) }
+    }
+
+    /// Loudest reading since the last call, and it resets the count.
+    ///
+    /// The waveform draws 20 bars a second while the microphone reports about 47 readings a
+    /// second. Reading the latest one alone threw away half the peaks, so a sharp syllable
+    /// could land on a short bar.
+    var peakLevelSinceLastRead: Float {
+        levelLock.withLock { state in
+            let peak = state.peak
+            state.peak = 0
+            return peak
+        }
+    }
+
+    /// Reads the saved microphone sensitivity into the audio thread.
+    /// Call this after the setting changes, so the running capture picks it up at once.
+    func applyVoiceThresholdSetting() {
+        let manual = VoiceActivity.savedManualLevel()
+        levelLock.withLock { $0.manualThreshold = manual }
+    }
+
+    /// Starts the microphone only to feed the settings meter. It keeps no samples.
+    func startMonitoring() throws {
+        guard !isRecording else { return }
+        try startRecording(clearSamples: true, monitorOnly: true)
+    }
+
+    func stopMonitoring() {
+        guard levelLock.withLock({ $0.isMonitorOnly }) else { return }
+        Task { _ = await stopRecordingAsync() }
     }
     
     private init() {
@@ -175,10 +232,22 @@ class AudioManager: ObservableObject {
     /// Initializes the audio engine and begins capturing samples.
     /// If the engine was pre-warmed via prepareEngine(), start is nearly instantaneous.
     /// - Parameter clearSamples: If true, previously recorded samples are discarded before starting.
-    func startRecording(clearSamples: Bool = true) throws {
+    func startRecording(clearSamples: Bool = true, monitorOnly: Bool = false) throws {
+        // A dictation that starts while the settings meter runs has to take the capture over,
+        // or the samples it needs are thrown away.
+        levelLock.withLock { $0.isMonitorOnly = monitorOnly }
         if clearSamples {
             // Must run on samplesQueue: the audio tap appends to this same buffer.
             samplesQueue.sync { accumulatedSamples.removeAll(keepingCapacity: true) }
+            // A new room, so the old noise floor does not apply.
+            let manual = VoiceActivity.savedManualLevel()
+            levelLock.withLock { state in
+                state.noiseFloor = 0
+                state.lastVoice = 0
+                state.peak = 0
+                state.isHearingVoice = false
+                state.manualThreshold = manual
+            }
         }
         
         // All engine work serialized on engineQueue to prevent races
@@ -312,6 +381,76 @@ class AudioManager: ObservableObject {
         }
     }
 
+    /// Number of samples captured so far. The live preview skips a pass when no new audio arrived.
+    var capturedSampleCount: Int {
+        samplesQueue.sync { accumulatedSamples.count }
+    }
+
+    /// Copies the captured audio without stopping the engine, so the live preview can read it
+    /// while the recording continues.
+    ///
+    /// Only the newest `maxSeconds` come back, because one preview pass has to stay short
+    /// enough to feel live. Long silences are cut out of that window first. A speaker who
+    /// thinks for ten seconds used to push their own opening sentence out of the window, and
+    /// the words already on screen then disappeared.
+    func snapshotSamples(maxSeconds: Double) -> [Float] {
+        let sampleRate = Int(targetFormat?.sampleRate ?? 16000)
+        let maxCount = Int(maxSeconds * Double(sampleRate))
+        let threshold = levelLock.withLock { $0.threshold }
+
+        let samples = samplesQueue.sync { accumulatedSamples }
+        guard samples.count > maxCount else { return samples }
+        return AudioManager.recentSpeech(in: samples, maxCount: maxCount, sampleRate: sampleRate, threshold: threshold)
+    }
+
+    /// Frame length used to look for silence. 100 ms is short enough to sit between words and
+    /// long enough to be cheap.
+    static let silenceFrameSeconds: Double = 0.1
+    /// A gap shorter than this stays in place. Cutting the natural gaps between words would
+    /// glue the words together and the model would read them wrong.
+    static let keptGapSeconds: Double = 0.6
+
+    /// Returns the newest `maxCount` samples, with long silences taken out.
+    static func recentSpeech(in samples: [Float], maxCount: Int, sampleRate: Int, threshold: Float) -> [Float] {
+        let frameLength = max(1, Int(silenceFrameSeconds * Double(sampleRate)))
+        let keptGapFrames = max(1, Int(keptGapSeconds / silenceFrameSeconds))
+
+        var kept: [Range<Int>] = []
+        var collected = 0
+        var quietRun = 0
+        var end = samples.count
+
+        // The walk runs backwards, because the newest speech is the speech to keep.
+        while end > 0 && collected < maxCount {
+            let start = max(0, end - frameLength)
+            var rms: Float = 0
+            samples.withUnsafeBufferPointer { buffer in
+                guard let base = buffer.baseAddress else { return }
+                vDSP_rmsqv(base + start, 1, &rms, vDSP_Length(end - start))
+            }
+
+            if rms > threshold {
+                quietRun = 0
+            } else {
+                quietRun += 1
+            }
+            // Only the opening of a long gap is dropped. The part next to the speech stays,
+            // so the model still hears where one sentence ends and the next begins.
+            if quietRun <= keptGapFrames {
+                kept.append(start..<end)
+                collected += end - start
+            }
+            end = start
+        }
+
+        var result = [Float]()
+        result.reserveCapacity(collected)
+        for range in kept.reversed() {
+            result.append(contentsOf: samples[range])
+        }
+        return result
+    }
+
     func stopRecordingAsync() async -> [Float] {
         await withCheckedContinuation { continuation in
             engineQueue.async { [weak self] in
@@ -328,7 +467,11 @@ class AudioManager: ObservableObject {
                 }
                 self.audioEngine?.stop()
                 
-                self.levelLock.withLock { $0.level = 0 }
+                self.levelLock.withLock { state in
+                    state.level = 0
+                    state.isHearingVoice = false
+                    state.isMonitorOnly = false
+                }
                 DispatchQueue.main.async {
                     self.isRecording = false
                     self.audioLevel = 0.0
@@ -392,6 +535,21 @@ class AudioManager: ObservableObject {
                 let now = DispatchTime.now().uptimeNanoseconds
                 let shouldPublish = levelLock.withLock { state -> Bool in
                     state.level = rms
+                    state.peak = max(state.peak, rms)
+                    if state.noiseFloor == 0 {
+                        state.noiseFloor = rms
+                    } else if rms < state.noiseFloor {
+                        state.noiseFloor += (rms - state.noiseFloor) * 0.2
+                    } else {
+                        // The floor rises slowly, so speech cannot drag it up with it.
+                        state.noiseFloor += (rms - state.noiseFloor) * 0.002
+                    }
+                    let threshold = VoiceActivity.threshold(manual: state.manualThreshold, noiseFloor: state.noiseFloor)
+                    state.threshold = threshold
+                    state.isHearingVoice = rms > threshold
+                    if state.isHearingVoice {
+                        state.lastVoice = now
+                    }
                     guard now &- state.lastPublish >= AudioManager.levelPublishInterval else { return false }
                     state.lastPublish = now
                     return true
@@ -402,6 +560,9 @@ class AudioManager: ObservableObject {
                     }
                 }
             }
+            // The settings meter needs the level only. Converting and keeping samples for it
+            // would waste the processor and grow a buffer that nobody reads.
+            if levelLock.withLock({ $0.isMonitorOnly }) { return }
             guard let converter = audioConverter, let targetFormat = targetFormat else { return }
             let ratio = targetFormat.sampleRate / buffer.format.sampleRate
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024

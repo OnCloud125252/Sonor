@@ -69,27 +69,30 @@ final class MLXEngine: TranscriptionEngine {
         isReady = true
     }
     
-    func transcribe(audioSamples: [Float], language: String, initialPrompt: String?) async throws -> String {
+    func transcribe(audioSamples: [Float], language: TranscriptionLanguage, vocabularyHints: [String]) async throws -> String {
         guard isReady else {
             throw NSError(domain: "MLXEngine", code: 2, userInfo: [NSLocalizedDescriptionKey: "Model not loaded"])
         }
         guard !audioSamples.isEmpty else { return "" }
         
         if repoId.lowercased().contains("qwen3") && !CommandLine.arguments.contains("--worker-mode") {
-            return try await runInWorker(audioSamples: audioSamples, language: language)
+            return try await runInWorker(audioSamples: audioSamples, language: language, vocabularyHints: vocabularyHints)
         }
         
-        return try await performTranscription(audioSamples: audioSamples, language: language, initialPrompt: initialPrompt)
+        return try await performTranscription(audioSamples: audioSamples, language: language, vocabularyHints: vocabularyHints)
     }
     
-    private func runInWorker(audioSamples: [Float], language: String) async throws -> String {
+    private func runInWorker(audioSamples: [Float], language: TranscriptionLanguage, vocabularyHints: [String]) async throws -> String {
         // Write audio samples to a temporary file
         let tempDir = FileManager.default.temporaryDirectory
         let audioFile = tempDir.appendingPathComponent(UUID().uuidString + ".raw")
         
         let audioData = audioSamples.withUnsafeBufferPointer { Data(buffer: $0) }
         try audioData.write(to: audioFile)
-        
+
+        // A term may hold a comma, so the list travels as JSON rather than as joined text.
+        let encodedHints = (try? JSONEncoder().encode(vocabularyHints))?.base64EncodedString() ?? ""
+
         return try await Task.detached {
             defer {
                 try? FileManager.default.removeItem(at: audioFile)
@@ -105,7 +108,8 @@ final class MLXEngine: TranscriptionEngine {
                 "--worker-mode",
                 "--repo-id", self.repoId,
                 "--audio", audioFile.path,
-                "--language", language
+                "--language", language.code,
+                "--vocabulary", encodedHints
             ]
             
             let pipe = Pipe()
@@ -143,11 +147,14 @@ final class MLXEngine: TranscriptionEngine {
         }.value
     }
     
-    func performTranscription(audioSamples: [Float], language: String, initialPrompt: String?) async throws -> String {
-        
-        // MLXAudioSTT models usually have a generate function taking audio data. 
-        // Some also take language or prompts depending on the model struct.
-        
+    func performTranscription(audioSamples: [Float], language: TranscriptionLanguage, vocabularyHints: [String]) async throws -> String {
+
+        // Every binding reads the language from the shared parameter block, so a model that
+        // supports the choice only needs `withLanguage`. The models that drop the field keep
+        // detecting the language themselves.
+        let languageCode = language.mlxCode
+        let vocabulary = vocabularyHints.joined(separator: ", ")
+
         // The unload timer can fire while this runs. Capturing the model here keeps it alive
         // for the whole transcription instead of letting `unload()` release it mid-flight.
         let senseVoice = senseVoiceModel
@@ -168,31 +175,49 @@ final class MLXEngine: TranscriptionEngine {
             eval(mlxAudio)
             
             if let model = senseVoice {
-                let output = model.generate(audio: mlxAudio)
+                let output = model.generate(audio: mlxAudio, generationParameters: model.defaultGenerationParameters.withLanguage(languageCode))
                 return output.text
             } else if let model = moonshine {
+                // Moonshine reads English alone and its binding drops the language.
                 let output = model.generate(audio: mlxAudio)
                 return output.text
             } else if let model = parakeet {
+                // The binding copies the language into the result but never into the decoder,
+                // so forcing one would change nothing. Parakeet detects it instead.
                 let output = model.generate(audio: mlxAudio)
                 return output.text
             } else if let model = qwen3ASR {
-                let output = model.generate(audio: mlxAudio, language: language)
+                // Qwen3 puts `context` in the system turn. That is where a vocabulary hint belongs.
+                let base = model.defaultGenerationParameters
+                let output = model.generate(
+                    audio: mlxAudio,
+                    maxTokens: base.maxTokens,
+                    temperature: base.temperature,
+                    context: vocabulary,
+                    language: languageCode,
+                    chunkDuration: base.chunkDuration,
+                    minChunkDuration: base.minChunkDuration,
+                    repetitionPenalty: base.repetitionPenalty,
+                    repetitionContextSize: base.repetitionContextSize
+                )
                 return output.text
             } else if let model = canary {
-                let output = model.generate(audio: mlxAudio)
+                let output = model.generate(audio: mlxAudio, generationParameters: model.defaultGenerationParameters.withLanguage(languageCode))
                 return output.text
             } else if let model = nemotron {
-                let output = model.generate(audio: mlxAudio)
+                let output = model.generate(audio: mlxAudio, generationParameters: model.defaultGenerationParameters.withLanguage(languageCode))
                 return output.text
             } else if let model = granite {
+                // Granite turns a language into a "Translate the speech to X." instruction, and
+                // its `prompt` field replaces that instruction rather than hinting vocabulary.
+                // Sonor passes neither, so Granite transcribes what it heard.
                 let output = model.generate(audio: mlxAudio)
                 return output.text
             } else if let model = fireRed {
-                let output = model.generate(audio: mlxAudio)
+                let output = model.generate(audio: mlxAudio, generationParameters: model.defaultGenerationParameters.withLanguage(languageCode))
                 return output.text
             } else if let model = cohere {
-                let output = model.generate(audio: mlxAudio)
+                let output = model.generate(audio: mlxAudio, generationParameters: model.defaultGenerationParameters.withLanguage(languageCode))
                 return output.text
             }
             
@@ -213,5 +238,29 @@ final class MLXEngine: TranscriptionEngine {
         self.isReady = false
         // Force garbage collection of MLX memory
         MLX.Memory.clearCache()
+    }
+}
+
+private extension STTGenerateParameters {
+    /// Returns a copy that asks the decoder for one language.
+    ///
+    /// Every other field keeps the value the model shipped with, so a tuned chunk length or
+    /// repetition penalty survives.
+    func withLanguage(_ language: String?) -> STTGenerateParameters {
+        STTGenerateParameters(
+            maxTokens: maxTokens,
+            temperature: temperature,
+            topP: topP,
+            topK: topK,
+            verbose: verbose,
+            language: language,
+            chunkDuration: chunkDuration,
+            minChunkDuration: minChunkDuration,
+            repetitionPenalty: repetitionPenalty,
+            repetitionContextSize: repetitionContextSize,
+            kvBits: kvBits,
+            kvGroupSize: kvGroupSize,
+            quantizedKVStart: quantizedKVStart
+        )
     }
 }

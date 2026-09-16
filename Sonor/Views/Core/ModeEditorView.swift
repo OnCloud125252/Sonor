@@ -512,49 +512,28 @@ struct ModeEditorView: View {
                             }
                         }
 
-                        if modeBinding.wrappedValue.name != "Pure Text" {
-                            HStack {
-                                Text(t("Language"))
-                                    .font(.system(size: 12))
-                                Spacer()
-                                Picker("", selection: Binding(
-                                    get: { modeBinding.wrappedValue.language ?? "auto" },
-                                    set: { modeBinding.wrappedValue.language = $0 }
-                                )) {
-                                    Text(t("Automatic")).tag("auto")
-                                    Text(t("العربية")).tag("ar")
-                                    Text(t("中文")).tag("zh")
-                                    Text(t("Čeština")).tag("cs")
-                                    Text(t("Dansk")).tag("da")
-                                    Text(t("Nederlands")).tag("nl")
-                                    Text(t("English")).tag("en")
-                                    Text(t("Suomi")).tag("fi")
-                                    Text(t("Français")).tag("fr")
-                                    Text(t("Deutsch")).tag("de")
-                                    Text(t("Ελληνικά")).tag("el")
-                                    Text(t("עברית")).tag("he")
-                                    Text(t("हिन्दी")).tag("hi")
-                                    Text(t("Magyar")).tag("hu")
-                                    Text(t("Italiano")).tag("it")
-                                    Text(t("日本語")).tag("ja")
-                                    Text(t("한국어")).tag("ko")
-                                    Text(t("Norsk")).tag("no")
-                                    Text(t("Polski")).tag("pl")
-                                    Text(t("Português")).tag("pt")
-                                    Text(t("Português (Brasil)")).tag("pt-BR")
-                                    Text(t("Română")).tag("ro")
-                                    Text(t("Русский")).tag("ru")
-                                    Text(t("Slovenčina")).tag("sk")
-                                    Text(t("Español")).tag("es")
-                                    Text(t("Svenska")).tag("sv")
-                                    Text(t("ไทย")).tag("th")
-                                    Text(t("Türkçe")).tag("tr")
-                                    Text(t("Українська")).tag("uk")
-                                    Text(t("Tiếng Việt")).tag("vi")
+                        // Every assistant shows this row. The choice drives the transcription
+                        // model, so it matters even for an assistant with no language model.
+                        HStack {
+                            Text(t("Language"))
+                                .font(.system(size: 12))
+                            Spacer()
+                            Picker("", selection: Binding(
+                                get: { modeBinding.wrappedValue.language ?? TranscriptionLanguage.followGlobalCode },
+                                set: {
+                                    modeBinding.wrappedValue.language = $0
+                                    saveModes()
                                 }
-                                .pickerStyle(.menu)
-                                .frame(width: 150)
+                            )) {
+                                Text(t("Follow global setting")).tag(TranscriptionLanguage.followGlobalCode)
+                                Divider()
+                                ForEach(TranscriptionLanguage.all) { language in
+                                    Text(language.isAutomatic ? t("Automatic") : language.nativeName)
+                                        .tag(language.code)
+                                }
                             }
+                            .pickerStyle(.menu)
+                            .frame(width: 150)
                         }
                         
                         HStack {

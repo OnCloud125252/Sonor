@@ -70,12 +70,18 @@ final class ModelManager: ObservableObject {
     
     protocol ModelMetadata {
         var weight: String { get }
-        var languages: String { get }
+        var languageSupport: ModelLanguageSupport { get }
         var accuracy: Double { get }
         var speed: Double { get }
         var company: String { get }
         var parameters: String? { get }
-        var supportedLanguagesList: [String] { get }
+        /// True when Sonor can pin the transcription language on this model.
+        ///
+        /// A model that reads only English, or a binding that drops the parameter, makes the
+        /// choice pointless. The model card warns the user in that case.
+        var canSelectLanguage: Bool { get }
+        /// True when this model accepts a vocabulary hint before it decodes.
+        var canUseInitialPrompt: Bool { get }
     }
 
     let modelFamilyDescriptions: [String: String] = [
@@ -100,28 +106,79 @@ final class ModelManager: ObservableObject {
         let expectedSize: Int64
         let expectedSHA256: String?
         let weight: String
-        let languages: String
+        let languageSupport: ModelLanguageSupport
         let accuracy: Double
         let speed: Double
         let company: String
         let parameters: String?
-        
-        var supportedLanguagesList: [String] {
-            return languages == "English" ? ["English (English)"] : ModelManager.whisperLanguageList
-        }
+
+        /// whisper.cpp writes a language token only for a multilingual build. The `.en` builds
+        /// drop the parameter, so Sonor must not offer the choice for them.
+        var canSelectLanguage: Bool { languageSupport == .multilingual }
+
+        /// Every whisper build reads `initial_prompt`.
+        var canUseInitialPrompt: Bool { true }
     }
 
     let availableWhisperModels: [WhisperModel] = [
+        // The multilingual builds come first. They are the only small models that can read
+        // Chinese, Japanese and every other language, so they are the ones the live preview
+        // can use. OpenAI ships the `.en` builds below as separate English-only models.
+        WhisperModel(
+            id: "tiny",
+            name: "Whisper Tiny (Multilingual)",
+            repoId: "ggerganov/whisper.cpp",
+            filename: "ggml-tiny.bin",
+            description: String(localized: "The fastest model. Good for the live preview, too rough for a final result."),
+            expectedSize: 77_691_713,
+            expectedSHA256: nil,
+            weight: "75 MB",
+            languageSupport: .multilingual,
+            accuracy: 0.5,
+            speed: 1.0,
+            company: "OpenAI",
+            parameters: "39M"
+        ),
+        WhisperModel(
+            id: "base",
+            name: "Whisper Base (Multilingual)",
+            repoId: "ggerganov/whisper.cpp",
+            filename: "ggml-base.bin",
+            description: String(localized: "Fast and still readable in every language. The best choice for the live preview."),
+            expectedSize: 147_951_465,
+            expectedSHA256: nil,
+            weight: "142 MB",
+            languageSupport: .multilingual,
+            accuracy: 0.62,
+            speed: 0.95,
+            company: "OpenAI",
+            parameters: "74M"
+        ),
+        WhisperModel(
+            id: "small",
+            name: "Whisper Small (Multilingual)",
+            repoId: "ggerganov/whisper.cpp",
+            filename: "ggml-small.bin",
+            description: String(localized: "Middle ground between speed and accuracy in every language."),
+            expectedSize: 487_601_967,
+            expectedSHA256: nil,
+            weight: "466 MB",
+            languageSupport: .multilingual,
+            accuracy: 0.8,
+            speed: 0.75,
+            company: "OpenAI",
+            parameters: "244M"
+        ),
         WhisperModel(
             id: "tiny.en",
-            name: "Whisper Tiny",
+            name: "Whisper Tiny (English)",
             repoId: "ggerganov/whisper.cpp",
             filename: "ggml-tiny.en.bin",
             description: String(localized: "Extremely fast, very low memory usage. Good for basic english dictation."),
             expectedSize: 77_704_715,
             expectedSHA256: nil,
             weight: "75 MB",
-            languages: "EN",
+            languageSupport: .englishOnly,
             accuracy: 0.6,
             speed: 1.0,
             company: "OpenAI",
@@ -129,14 +186,14 @@ final class ModelManager: ObservableObject {
         ),
         WhisperModel(
             id: "base.en",
-            name: "Whisper Base",
+            name: "Whisper Base (English)",
             repoId: "ggerganov/whisper.cpp",
             filename: "ggml-base.en.bin",
             description: String(localized: "Fast, low memory usage. Better accuracy than Tiny."),
             expectedSize: 147_964_211,
             expectedSHA256: nil,
             weight: "142 MB",
-            languages: "EN",
+            languageSupport: .englishOnly,
             accuracy: 0.7,
             speed: 0.9,
             company: "OpenAI",
@@ -144,14 +201,14 @@ final class ModelManager: ObservableObject {
         ),
         WhisperModel(
             id: "small.en",
-            name: "Whisper Small",
+            name: "Whisper Small (English)",
             repoId: "ggerganov/whisper.cpp",
             filename: "ggml-small.en.bin",
             description: String(localized: "Good balance of speed and accuracy for English."),
             expectedSize: 487_614_201,
             expectedSHA256: nil,
             weight: "466 MB",
-            languages: "EN",
+            languageSupport: .englishOnly,
             accuracy: 0.85,
             speed: 0.7,
             company: "OpenAI",
@@ -166,11 +223,11 @@ final class ModelManager: ObservableObject {
             expectedSize: 574_041_195,
             expectedSHA256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
             weight: "547 MB",
-            languages: "Multilingual",
+            languageSupport: .multilingual,
             accuracy: 0.95,
             speed: 0.8,
             company: "OpenAI",
-            parameters: "1.55B"
+            parameters: "809M"
         )
     ]
     
@@ -181,17 +238,15 @@ final class ModelManager: ObservableObject {
         let repoId: String
         let description: String
         let weight: String
-        let languages: String
+        let languageSupport: ModelLanguageSupport
+        /// Set per model, because the MLX binding decides this, not the model. Parakeet reads
+        /// 25 languages but its binding only reports the one it detected.
+        let canSelectLanguage: Bool
+        let canUseInitialPrompt: Bool
         let accuracy: Double
         let speed: Double
         let company: String
         let parameters: String?
-        
-        var supportedLanguagesList: [String] {
-            if languages == "English" { return ["English (English)"] }
-            if family == "SenseVoice" { return ["English (English)", "Chinese (中文)", "Japanese (日本語)", "Korean (한국어)", "Cantonese (粵語)"] }
-            return ModelManager.whisperLanguageList
-        }
     }
 
     let availableMLXModels: [MLXModel] = [
@@ -202,7 +257,9 @@ final class ModelManager: ObservableObject {
             repoId: "mlx-community/SenseVoiceSmall",
             description: String(localized: "Extremely fast, excellent multilingual support and accent recognition."),
             weight: "~1 GB",
-            languages: String(localized: "Multilingual (EN, ZH, JA, KO, YUE)"),
+            languageSupport: .senseVoice,
+            canSelectLanguage: true,
+            canUseInitialPrompt: false,
             accuracy: 0.85,
             speed: 0.95,
             company: "Alibaba",
@@ -215,7 +272,9 @@ final class ModelManager: ObservableObject {
             repoId: "UsefulSensors/moonshine-tiny",
             description: String(localized: "Very small and fast, optimized for resource-constrained environments."),
             weight: "~110 MB",
-            languages: String(localized: "English"),
+            languageSupport: .englishOnly,
+            canSelectLanguage: false,
+            canUseInitialPrompt: false,
             accuracy: 0.6,
             speed: 1.0,
             company: "UsefulSensors",
@@ -228,7 +287,9 @@ final class ModelManager: ObservableObject {
             repoId: "UsefulSensors/moonshine-base",
             description: String(localized: "Balanced accuracy and speed."),
             weight: "~250 MB",
-            languages: String(localized: "English"),
+            languageSupport: .englishOnly,
+            canSelectLanguage: false,
+            canUseInitialPrompt: false,
             accuracy: 0.75,
             speed: 0.9,
             company: "UsefulSensors",
@@ -241,7 +302,9 @@ final class ModelManager: ObservableObject {
             repoId: "mlx-community/parakeet-tdt-0.6b-v3",
             description: String(localized: "High accuracy model from NVIDIA NeMo."),
             weight: "~2.5 GB",
-            languages: String(localized: "English"),
+            languageSupport: .parakeetV3,
+            canSelectLanguage: false,
+            canUseInitialPrompt: false,
             accuracy: 0.85,
             speed: 0.7,
             company: "NVIDIA",
@@ -254,7 +317,9 @@ final class ModelManager: ObservableObject {
             repoId: "mlx-community/Qwen3-ASR-1.7B-4bit",
             description: String(localized: "Large and powerful ASR model for advanced transcription."),
             weight: "~1.6 GB",
-            languages: String(localized: "Multilingual"),
+            languageSupport: .multilingual,
+            canSelectLanguage: true,
+            canUseInitialPrompt: true,
             accuracy: 0.95,
             speed: 0.5,
             company: "Alibaba",
@@ -268,7 +333,9 @@ final class ModelManager: ObservableObject {
             repoId: "qfuxa/canary-mlx",
             description: String(localized: "High precision end-to-end model from NVIDIA. Natural formatting and punctuation."),
             weight: "~3.92 GB",
-            languages: String(localized: "Multilingual (EN, DE, ES, FR)"),
+            languageSupport: .canary,
+            canSelectLanguage: true,
+            canUseInitialPrompt: false,
             accuracy: 0.96,
             speed: 0.7,
             company: "NVIDIA",
@@ -281,7 +348,9 @@ final class ModelManager: ObservableObject {
             repoId: "mlx-community/nemotron-3.5-asr-streaming-0.6b",
             description: String(localized: "Fast and highly accurate transcription model from NVIDIA."),
             weight: "~1.2 GB",
-            languages: String(localized: "Multilingual"),
+            languageSupport: .multilingual,
+            canSelectLanguage: true,
+            canUseInitialPrompt: false,
             accuracy: 0.92,
             speed: 0.9,
             company: "NVIDIA",
@@ -294,7 +363,9 @@ final class ModelManager: ObservableObject {
             repoId: "mlx-community/granite-speech-4.1-2b-nar-mlx",
             description: String(localized: "Enterprise-focused speech model. Reliable and clear transcriptions."),
             weight: "~4.5 GB",
-            languages: String(localized: "English"),
+            languageSupport: .englishOnly,
+            canSelectLanguage: false,
+            canUseInitialPrompt: false,
             accuracy: 0.88,
             speed: 0.85,
             company: "IBM",
@@ -307,7 +378,9 @@ final class ModelManager: ObservableObject {
             repoId: "FireRedTeam/FireRedASR-AED-L",
             description: String(localized: "High-performance ASR system capable of accurately transcribing diverse speech patterns."),
             weight: "~4.6 GB",
-            languages: String(localized: "Multilingual"),
+            languageSupport: .multilingual,
+            canSelectLanguage: true,
+            canUseInitialPrompt: false,
             accuracy: 0.90,
             speed: 0.8,
             company: "FireRedTeam",
@@ -320,7 +393,9 @@ final class ModelManager: ObservableObject {
             repoId: "aufklarer/Cohere-Transcribe-2B-MLX-5bit",
             description: String(localized: "Business-oriented model designed to handle specialized terminology and complex phrasing."),
             weight: "~1.8 GB",
-            languages: String(localized: "Multilingual"),
+            languageSupport: .multilingual,
+            canSelectLanguage: true,
+            canUseInitialPrompt: false,
             accuracy: 0.93,
             speed: 0.75,
             company: "Cohere",
@@ -349,6 +424,21 @@ final class ModelManager: ObservableObject {
     
     var whisperModelURL: URL {
         return urlForWhisperModel(id: selectedWhisperModelId) ?? urlForWhisperModel(id: "large-v3-turbo")!
+    }
+
+    /// The model a recording uses when no assistant overrides it.
+    ///
+    /// Apple Speech has no entry in the model tables, so it returns nil. A caller reads that as
+    /// "the language choice works", because `AppleSpeechEngine` builds a recognizer per locale.
+    var activeTranscriptionModel: (any ModelMetadata)? {
+        switch TranscriptionManager.shared.currentEngineType {
+        case .whisper:
+            return availableWhisperModels.first { $0.id == selectedWhisperModelId }
+        case .mlx:
+            return availableMLXModels.first { $0.id == selectedMLXModelId }
+        case .appleSpeech:
+            return nil
+        }
     }
 
     func urlForWhisperModel(id: String) -> URL? {

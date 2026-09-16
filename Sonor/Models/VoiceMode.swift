@@ -18,7 +18,9 @@ struct VoiceMode: Identifiable, Codable, Equatable {
     var assistantType: String? 
     var passAppName: Bool?
     var passCopiedText: Bool?
-    var language: String? 
+    /// nil or `TranscriptionLanguage.followGlobalCode` follows the global language.
+    /// Any other value is a `TranscriptionLanguage` code this assistant pins for itself.
+    var language: String?
     var isBuiltIn: Bool? 
     var fallbackToClipboard: Bool? // Deprecated
     var fallbackBehavior: String? // "none", "overlay", "clipboard"
@@ -32,7 +34,7 @@ struct VoiceMode: Identifiable, Codable, Equatable {
     var llmModelOverride: String?
     /// Sampling temperature for this assistant only. nil uses the global value.
     var llmTemperatureOverride: Double?
-    init(id: UUID = UUID(), name: String, prompt: String, boundAppBundleIDs: [String] = [], audioBehavior: AudioBehavior? = .keep, assistantType: String? = "dictation", passAppName: Bool? = true, passCopiedText: Bool? = true, language: String? = "auto", isBuiltIn: Bool? = false, fallbackBehavior: String? = "overlay", postPasteAction: String? = "none", modelOverride: String? = nil, fallbackToClipboard: Bool? = nil, isEnabled: Bool? = nil, llmProviderOverride: String? = nil, llmModelOverride: String? = nil, llmTemperatureOverride: Double? = nil) {
+    init(id: UUID = UUID(), name: String, prompt: String, boundAppBundleIDs: [String] = [], audioBehavior: AudioBehavior? = .keep, assistantType: String? = "dictation", passAppName: Bool? = true, passCopiedText: Bool? = true, language: String? = nil, isBuiltIn: Bool? = false, fallbackBehavior: String? = "overlay", postPasteAction: String? = "none", modelOverride: String? = nil, fallbackToClipboard: Bool? = nil, isEnabled: Bool? = nil, llmProviderOverride: String? = nil, llmModelOverride: String? = nil, llmTemperatureOverride: Double? = nil) {
         self.id = id
         self.name = name
         self.prompt = prompt
@@ -123,6 +125,12 @@ struct VoiceMode: Identifiable, Codable, Equatable {
                 } else {
                     modes[i].fallbackBehavior = "overlay"
                 }
+            }
+            // Every assistant used to be born with `auto`, so that value cannot be read as a
+            // deliberate choice. Clearing it lets the global language reach an assistant the
+            // user never edited. The picker can still pin `auto` afterwards.
+            if modes[i].language == TranscriptionLanguage.automaticCode {
+                modes[i].language = TranscriptionLanguage.followGlobalCode
             }
         }
         let deprecatedNames = ["Poprawianie", "Formalny", "Strukturyzowana notatka", "Structured Note", "Notatka markdown", "Notatka Markdown", "Markdown Note"]

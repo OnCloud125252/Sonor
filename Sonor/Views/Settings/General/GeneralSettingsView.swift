@@ -16,13 +16,18 @@ struct GeneralSettingsView: View {
     @AppStorage("appTheme") private var appTheme = "system"
     @AppStorage("hudAppearance") private var hudAppearance = "glass"
     @AppStorage("hudPositionMode") private var hudPositionMode: HUDPositionMode = .free
+    @AppStorage("showTranscriptPanel") private var showTranscriptPanel = true
+    @AppStorage("showLiveTranscript") private var showLiveTranscript = false
     @AppStorage("playAnySound") private var playAnySound = true
     @AppStorage("playSound_Start") private var playSound_Start = true
     @AppStorage("playSound_Error") private var playSound_Error = true
     @AppStorage("playSound_End") private var playSound_End = true
     @ObservedObject private var memoryManager = MessageMemoryManager.shared
     @ObservedObject private var modelManager = ModelManager.shared
+    /// Observed so the language warning follows a change of engine or model.
+    @ObservedObject private var transcriptionManager = TranscriptionManager.shared
     @ObservedObject private var llmSettings = LLMSettings.shared
+    @AppStorage(TranscriptionLanguage.storageKey) private var transcriptionLanguage = TranscriptionLanguage.automaticCode
     @State private var isShowingSwitchToRamAlert = false
     @State private var isShowingDeleteAudioAlert = false
     @State private var isShowingDuplicateShortcutAlert = false
@@ -32,6 +37,10 @@ struct GeneralSettingsView: View {
     @State private var maxPressedModifiers: Set<UInt16> = []
     @State private var audioDevices: [AudioDevice] = []
     @State private var audioOutputDevices: [AudioDevice] = []
+    @AppStorage(TranscriptionManager.previewModelKey) private var previewModelId = TranscriptionManager.defaultPreviewModelId
+    @AppStorage(VoiceActivity.modeKey) private var voiceThresholdMode = VoiceActivity.Mode.automatic.rawValue
+    @AppStorage(VoiceActivity.levelKey) private var voiceThresholdLevel = VoiceActivity.defaultMeterValue
+    @StateObject private var micLevels = MicLevelStore()
     @AppStorage("selectedAudioDeviceUID") private var selectedDeviceUID = ""
     @AppStorage("selectedAudioOutputDeviceUID") private var selectedOutputDeviceUID = ""
     @AppStorage("appVolume") private var appVolume: Double = 1.0
@@ -59,6 +68,8 @@ struct GeneralSettingsView: View {
             appThemeSection
             systemIntegrationSection
             hudAppearanceSection
+            microphoneSensitivitySection
+            speechLanguageSection
             appLanguageSection
             memoryManagementSection
             historyStorageSection
@@ -179,6 +190,88 @@ struct GeneralSettingsView: View {
             Text(t("This shortcut is already used by another action."))
         }
     }
+    /// The models the live preview can use.
+    ///
+    /// Only a downloaded multilingual model can run the preview. The `.en` builds read English
+    /// alone, so they would return nothing useful for any other language.
+    private var previewModelChoices: [(id: String, name: String)] {
+        var choices: [(id: String, name: String)] = [("", t("Off"))]
+        for model in modelManager.availableWhisperModels where model.languageSupport == .multilingual {
+            guard case .downloaded = modelManager.whisperStates[model.id] else { continue }
+            choices.append((model.id, model.name))
+        }
+        return choices
+    }
+
+    /// Lets the user set how loud a sound has to be before Sonor calls it a voice.
+    ///
+    /// The live preview only runs the transcription model after the microphone hears a voice.
+    /// A mark that sits too low makes the preview run on room noise. A mark that sits too high
+    /// makes the preview stop while the user still speaks.
+    @ViewBuilder
+    private var microphoneSensitivitySection: some View {
+        let isAutomatic = voiceThresholdMode == VoiceActivity.Mode.automatic.rawValue
+        VStack(alignment: .leading, spacing: 15) {
+            Text(t("Microphone Sensitivity"))
+                .font(.system(size: 16, weight: .semibold))
+
+            Toggle(t("Set the level by hand"), isOn: Binding(
+                get: { !isAutomatic },
+                set: { manual in
+                    voiceThresholdMode = manual ? VoiceActivity.Mode.manual.rawValue : VoiceActivity.Mode.automatic.rawValue
+                    AudioManager.shared.applyVoiceThresholdSetting()
+                }
+            ))
+            .toggleStyle(CustomToggleStyle())
+
+            Text(isAutomatic
+                 ? t("Sonor follows the room and moves the mark for you. Speak to see where it sits.")
+                 : t("Drag the mark. A sound left of the mark counts as room noise. A sound right of it counts as a voice."))
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VoiceLevelMeter(
+                meterValue: Binding(
+                    get: { voiceThresholdLevel },
+                    set: { newValue in
+                        voiceThresholdLevel = newValue
+                        AudioManager.shared.applyVoiceThresholdSetting()
+                    }
+                ),
+                isAutomatic: isAutomatic,
+                levels: micLevels
+            )
+
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(micLevels.isHearingVoice ? Color.green : Color.primary.opacity(0.25))
+                    .frame(width: 7, height: 7)
+                Text(micLevels.isHearingVoice ? t("Sonor hears a voice") : t("Sonor hears the room"))
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(appColorScheme == .dark ? Color.white.opacity(0.02) : Color.black.opacity(0.01))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(appColorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.08), lineWidth: 1)
+        )
+        .onAppear {
+            AudioManager.shared.applyVoiceThresholdSetting()
+            // The meter needs a live signal, and the microphone is idle outside a dictation.
+            try? AudioManager.shared.startMonitoring()
+        }
+        .onDisappear {
+            AudioManager.shared.stopMonitoring()
+        }
+    }
+
     @ViewBuilder
     private var historyStorageSection: some View {
         VStack(alignment: .leading, spacing: 15) {
@@ -802,7 +895,62 @@ struct GeneralSettingsView: View {
                 
             Divider()
                 .padding(.vertical, 5)
-            
+
+            VStack(alignment: .leading, spacing: 15) {
+                Text(t("Transcript Panel"))
+                    .font(.system(size: 16, weight: .semibold))
+
+                Toggle(t("Show the text above the overlay"), isOn: $showTranscriptPanel)
+                    .toggleStyle(CustomToggleStyle())
+
+                Text(t("The panel shows what you dictated. Words the assistant removed are red and crossed out. Words it added are green."))
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if showTranscriptPanel {
+                    Toggle(t("Show the words while you speak"), isOn: $showLiveTranscript)
+                        .toggleStyle(CustomToggleStyle())
+
+                    Text(t("The transcription model runs again and again while you speak. This uses more battery and can slow down older Macs."))
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if showLiveTranscript {
+                        HStack {
+                            Text(t("Preview model"))
+                                .font(.system(size: 13))
+                            Spacer()
+                            Picker("", selection: $previewModelId) {
+                                ForEach(previewModelChoices, id: \.id) { choice in
+                                    Text(choice.name).tag(choice.id)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .labelsHidden()
+                            .font(.system(size: 13))
+                            .id(localizer.appLanguage)
+                        }
+
+                        Text(t("A small model keeps up with your voice. The final text always comes from the model you picked in Models, never from this one."))
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if previewModelChoices.count <= 1 {
+                            Text(t("Download Whisper Base (Multilingual) in Models to use the live preview."))
+                                .font(.system(size: 12))
+                                .foregroundColor(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+                .padding(.vertical, 5)
+
             HStack {
                 Text(t("Duration (when no field is detected)"))
                     .font(.system(size: 13))
@@ -854,6 +1002,53 @@ struct GeneralSettingsView: View {
                 .stroke(appColorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.08), lineWidth: 1)
         )
     }
+    /// The language Sonor forces on the transcription model.
+    ///
+    /// The same choice tells the assistant which language to write back in, so one setting
+    /// covers dictation from the microphone to the pasted text.
+    @ViewBuilder
+    private var speechLanguageSection: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            Text(t("Speech Language"))
+                .font(.system(size: 16, weight: .semibold))
+            HStack {
+                Text(t("Dictation language"))
+                    .font(.system(size: 13))
+                Spacer()
+                Picker("", selection: $transcriptionLanguage) {
+                    ForEach(TranscriptionLanguage.all) { language in
+                        Text(language.isAutomatic ? t("Automatic") : language.nativeName)
+                            .tag(language.code)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .font(.system(size: 13))
+                .id(localizer.appLanguage)
+            }
+            Text(t("Sonor tells the transcription model which language you speak, and the assistant writes back in that language. Each assistant can override this in its own settings."))
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+            if transcriptionLanguage != TranscriptionLanguage.automaticCode,
+               let activeModel = modelManager.activeTranscriptionModel,
+               !activeModel.canSelectLanguage {
+                Label(t("The active model ignores this choice and detects the language itself. Pick another model in Models to force a language."), systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12))
+                    .foregroundColor(.orange)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(appColorScheme == .dark ? Color.white.opacity(0.02) : Color.black.opacity(0.01))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(appColorScheme == .dark ? Color.white.opacity(0.1) : Color.black.opacity(0.08), lineWidth: 1)
+        )
+    }
+
     @ViewBuilder
     private var appLanguageSection: some View {
         VStack(alignment: .leading, spacing: 15) {
