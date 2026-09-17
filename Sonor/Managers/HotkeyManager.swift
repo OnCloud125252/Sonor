@@ -11,7 +11,9 @@ import os
 /// port that was already invalidated, which crashes with SIGSEGV inside SLEventTapEnable.
 /// Keeping the state per session, and waiting for the thread to come up and go down, makes the
 /// tap thread unable to outlive its own tap.
-private final class EventTapSession {
+/// The tap runs its own run loop thread and the session is read from inside a lock, so it never
+/// belongs to the main actor. The semaphore handshake in `start()` orders the field writes.
+private nonisolated final class EventTapSession: @unchecked Sendable {
     let tap: CFMachPort
     private let readySignal = DispatchSemaphore(value: 0)
     private let finishedSignal = DispatchSemaphore(value: 0)
