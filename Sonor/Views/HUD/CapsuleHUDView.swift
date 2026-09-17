@@ -190,12 +190,11 @@ struct CapsuleHUDView: View {
     /// Turns the status into words a reader understands.
     ///
     /// `statusText` also drives app state, so the strings themselves cannot change. This maps
-    /// them for the screen only. "Streaming" and "Processing" describe the machine. The user
+    /// them for the screen only. "Processing" and "Modifying" describe the machine. The user
     /// wants to know what is happening to their words.
     private func statusLabel(_ status: String) -> String {
         switch status {
         case "Processing": return "Reading your voice"
-        case "Streaming": return "Typing it out"
         case "Modifying": return "Improving the text"
         case "Done!": return "Pasted"
         case "No text recognized.": return "Heard nothing"

@@ -34,9 +34,6 @@ class AssistantWorkflowService {
         
         let isTextFieldDetected = isBackgroundRetry ? false : PasteManager.shared.isTextFieldFocused(pid: frontmostPID)
         
-        // willPaste: only paste if a text field was actually found
-        var willPaste = isBackgroundRetry ? false : isTextFieldDetected
-        
         let shouldRunLLM = !selectedMode.prompt.isEmpty
         /// Set when the rewrite did not finish cleanly. The transcript still reaches the user,
         /// so the status and the sound are the only way they learn the assistant did not run.
@@ -146,21 +143,8 @@ class AssistantWorkflowService {
             let systemPrompt = buildSystemPrompt(selectedMode: selectedMode, detectedLanguage: detectedLang)
             if Task.isCancelled { return }
             
-            if willPaste {
-                if let targetApp = NSRunningApplication(processIdentifier: frontmostPID) {
-                    targetApp.activate(options: .activateAllWindows)
-                    var attempts = 0
-                    while !targetApp.isActive && attempts < 10 {
-                        try? await Task.sleep(nanoseconds: 50_000_000)
-                        attempts += 1
-                    }
-                }
-            }
-            
             var didStartStreaming = false
             var fullGeneratedText = ""
-            var streamedText = ""
-            let initialWillPaste = willPaste
             // One hop to the main actor per token would flood it. The panel only needs to
             // keep up with the eye.
             var lastPanelUpdate = CFAbsoluteTimeGetCurrent()
@@ -179,33 +163,7 @@ class AssistantWorkflowService {
                 if !didStartStreaming {
                     didStartStreaming = true
                     Task { @MainActor in
-                        if willPaste {
-                            onStatusChange("Streaming")
-                        } else {
-                            onStatusChange(generatingLabel)
-                        }
-                    }
-                }
-                if willPaste {
-                    let isActive = NSRunningApplication(processIdentifier: frontmostPID)?.isActive ?? false
-                    let stillFocused = isActive && PasteManager.shared.isTextFieldFocused(pid: frontmostPID)
-                    
-                    if !stillFocused {
-                        willPaste = false
-                        Task { @MainActor in
-                            onStatusChange(noFieldLabel)
-                            
-                            // Schedule changing back to generatingLabel after 1.5 seconds if still generating
-                            try? await Task.sleep(nanoseconds: 1_500_000_000)
-                            if isGenerating {
-                                onStatusChange(generatingLabel)
-                            }
-                        }
-                    } else {
-                        streamedText += token
-                        DispatchQueue.global(qos: .userInteractive).async {
-                            PasteManager.shared.typeTextToken(token: token, targetPID: frontmostPID)
-                        }
+                        onStatusChange(generatingLabel)
                     }
                 }
                 return true
@@ -227,43 +185,27 @@ class AssistantWorkflowService {
             let finalPID = frontmostPID
             let finalFocused = isBackgroundRetry ? false : PasteManager.shared.isTextFieldFocused(pid: finalPID)
             
-            let willDoFinalPaste = isBackgroundRetry ? false : (finalFocused && (!initialWillPaste || !willPaste))
-            let actuallyPasted = (initialWillPaste && willPaste) || willDoFinalPaste
+            let actuallyPasted = finalFocused && !fullGeneratedText.isEmpty
             let fallbackBehavior = selectedMode.fallbackBehavior ?? "overlay"
             let willFallback = !actuallyPasted && fallbackBehavior == "clipboard" && !isBackgroundRetry
             let willShowOverlay = !actuallyPasted && fallbackBehavior == "overlay" && !isBackgroundRetry
             
             if actuallyPasted {
-                if willDoFinalPaste {
-                    if let targetApp = NSRunningApplication(processIdentifier: finalPID), !targetApp.isActive {
-                        targetApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-                        var attempts = 0
-                        while !targetApp.isActive && attempts < 10 {
-                            try? await Task.sleep(nanoseconds: 50_000_000)
-                            attempts += 1
-                        }
+                if let targetApp = NSRunningApplication(processIdentifier: finalPID), !targetApp.isActive {
+                    targetApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                    var attempts = 0
+                    while !targetApp.isActive && attempts < 10 {
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                        attempts += 1
                     }
-                    var textToPaste = fullGeneratedText
-                    if initialWillPaste && !streamedText.isEmpty {
-                        if let currentFieldText = PasteManager.shared.readFocusedTextField(pid: finalPID), currentFieldText.contains(streamedText) {
-                            textToPaste = String(fullGeneratedText.dropFirst(streamedText.count))
-                        }
-                    }
-                    if !textToPaste.isEmpty {
-                        await Task.detached(priority: .userInitiated) {
-                            PasteManager.shared.typeTextDirectly(text: textToPaste, targetPID: finalPID, forceFocusElement: nil)
-                            if let action = selectedMode.postPasteAction, action != "none" {
-                                PasteManager.shared.simulatePostPasteAction(action: action, targetPID: finalPID)
-                            }
-                        }.value
-                    }
-                } else {
-                    await Task.detached(priority: .userInitiated) {
-                        if let action = selectedMode.postPasteAction, action != "none" {
-                            PasteManager.shared.simulatePostPasteAction(action: action, targetPID: finalPID)
-                        }
-                    }.value
                 }
+                let textToPaste = fullGeneratedText
+                await Task.detached(priority: .userInitiated) {
+                    PasteManager.shared.typeTextDirectly(text: textToPaste, targetPID: finalPID, forceFocusElement: nil)
+                    if let action = selectedMode.postPasteAction, action != "none" {
+                        PasteManager.shared.simulatePostPasteAction(action: action, targetPID: finalPID)
+                    }
+                }.value
             } else if willFallback {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(fullGeneratedText, forType: .string)
@@ -293,7 +235,7 @@ class AssistantWorkflowService {
                 let llmModel = LLMManager.shared.activeModelLabel(for: selectedMode)
                 MessageMemoryManager.shared.saveMessage(fullGeneratedText, samples: audioSamples, appName: appName, transcriptionModel: whisperModel, llmModel: llmModel, modeName: selectedMode.name)
             }
-            if finalFocused || initialWillPaste {
+            if finalFocused {
                 await MainActor.run {
                     onAutoLearnTrigger(finalPID, fullGeneratedText)
                 }
