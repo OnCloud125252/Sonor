@@ -3,6 +3,7 @@ import AppKit
 import Combine
 import AVFoundation
 import CoreAudio
+import os
 
 /// Holds the 20 Hz waveform data on its own so that only the waveform view redraws.
 /// Publishing this from `AppController` rebuilt the whole HUD tree 20 times per second.
@@ -108,6 +109,7 @@ class AppController: NSObject, ObservableObject {
     }
     
     private let audioManager = AudioManager.shared
+    static let dictationLog = Logger(subsystem: "dev.Sonor", category: "dictation")
     
     
     
@@ -568,6 +570,12 @@ class AppController: NSObject, ObservableObject {
 
         do {
             let transcribedText = try await TranscriptionManager.shared.transcribe(audioSamples: samples, language: language, vocabularyHints: vocabularyHints)
+            // Written on every dictation so a short result can be traced back to its cause:
+            // a short recording means the capture lost audio, a short text means the model did.
+            AppController.dictationLog.notice("""
+                dictation finished: \(Double(samples.count) / 16000, format: .fixed(precision: 1))s audio, \
+                \(transcribedText.count) characters
+                """)
             
             if Task.isCancelled {
                 if !isInlineRetry {
