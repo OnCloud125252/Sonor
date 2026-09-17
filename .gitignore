@@ -72,3 +72,6 @@ scratch/
 *.ts
 *.pl
 *.php
+
+# Scripts that belong to the project, not stray files next to the sources.
+!scripts/*.sh
