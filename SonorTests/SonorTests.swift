@@ -982,13 +982,15 @@ struct PreviewWindowTests {
     }
 
     @Test func theGapNextToTheSpeechStays() {
-        // The model still has to hear where one sentence ends and the next begins.
-        let samples = speech(seconds: 1) + silence(seconds: 10) + speech(seconds: 1)
-        let result = recent(samples, seconds: 20)
+        // The model still has to hear where one sentence ends and the next begins. The window
+        // is smaller than the audio here, so the cut really runs.
+        let samples = speech(seconds: 2) + silence(seconds: 10) + speech(seconds: 2)
+        let result = recent(samples, seconds: 4)
         let quiet = result.count - loudCount(result)
 
         #expect(quiet > 0)
         #expect(Double(quiet) < AudioManager.keptGapSeconds * 2 * Double(Self.sampleRate))
+        #expect(result.count < samples.count)
     }
 
     @Test func aShortGapIsLeftAlone() {
@@ -1004,9 +1006,78 @@ struct PreviewWindowTests {
         #expect(result.count == samples.count)
     }
 
-    @Test func silenceAloneReturnsOnlyTheKeptGap() {
+    @Test func silenceAloneReturnsTheNewestWindow() {
+        // Nothing beats the threshold, so the cut would leave a fraction of a second. The
+        // plain newest window has to win instead.
         let result = recent(silence(seconds: 20), seconds: 10)
         #expect(loudCount(result) == 0)
-        #expect(Double(result.count) <= AudioManager.keptGapSeconds * 2 * Double(Self.sampleRate))
+        #expect(result.count == 10 * Self.sampleRate)
+    }
+
+    @Test func aThresholdAboveTheWholeRecordingStillReturnsTheNewestWindow() {
+        // This is what a drifting noise floor did: the speaker ended up below their own
+        // threshold, the cut kept almost nothing, and the preview showed the last words only.
+        let samples = speech(seconds: 30, level: 0.05)
+        let result = AudioManager.recentSpeech(
+            in: samples,
+            maxCount: 10 * Self.sampleRate,
+            sampleRate: Self.sampleRate,
+            threshold: 0.5
+        )
+        #expect(result.count == 10 * Self.sampleRate)
+    }
+}
+
+/// Guards the rule that decides when the live preview reads the microphone again.
+/// The buffer keeps growing while the room is silent. A test on the sample count alone let the
+/// engine run for ever on the same quiet audio, and the words on screen kept rewriting
+/// themselves while the user said nothing.
+struct LivePreviewGateTests {
+
+    private func conditions(
+        recording: Bool = true,
+        paused: Bool = false,
+        samples: Int = 48_000,
+        voiceAt: UInt64 = 5_000
+    ) -> LivePreviewGate.Conditions {
+        LivePreviewGate.Conditions(
+            isRecording: recording,
+            isPaused: paused,
+            capturedSamples: samples,
+            lastVoiceUptime: voiceAt
+        )
+    }
+
+    @Test func aVoiceSinceTheLastPassStartsAPass() {
+        #expect(LivePreviewGate.shouldRun(conditions(voiceAt: 5_000), lastPassUptime: 4_000))
+    }
+
+    @Test func silenceSinceTheLastPassStartsNothing() {
+        // The buffer still grows, but nothing was said, so there is nothing new to read.
+        #expect(!LivePreviewGate.shouldRun(conditions(voiceAt: 4_000), lastPassUptime: 4_000))
+        #expect(!LivePreviewGate.shouldRun(conditions(voiceAt: 3_000), lastPassUptime: 4_000))
+    }
+
+    @Test func aMicrophoneThatNeverHeardAVoiceStartsNothing() {
+        #expect(!LivePreviewGate.shouldRun(conditions(voiceAt: 0), lastPassUptime: 0))
+    }
+
+    @Test func tooLittleAudioStartsNothing() {
+        // Under a second the buffer holds little more than noise, and the model invents words.
+        #expect(!LivePreviewGate.shouldRun(conditions(samples: LivePreviewGate.minimumSamples - 1), lastPassUptime: 0))
+        #expect(LivePreviewGate.shouldRun(conditions(samples: LivePreviewGate.minimumSamples), lastPassUptime: 0))
+    }
+
+    @Test func aStoppedOrPausedMicrophoneStartsNothing() {
+        #expect(!LivePreviewGate.shouldRun(conditions(recording: false), lastPassUptime: 0))
+        #expect(!LivePreviewGate.shouldRun(conditions(paused: true), lastPassUptime: 0))
+    }
+
+    @Test func aPassRunsAgainOnlyAfterTheNextVoice() {
+        var lastPass: UInt64 = 0
+        #expect(LivePreviewGate.shouldRun(conditions(voiceAt: 1_000), lastPassUptime: lastPass))
+        lastPass = 2_000
+        #expect(!LivePreviewGate.shouldRun(conditions(voiceAt: 1_000), lastPassUptime: lastPass))
+        #expect(LivePreviewGate.shouldRun(conditions(voiceAt: 3_000), lastPassUptime: lastPass))
     }
 }

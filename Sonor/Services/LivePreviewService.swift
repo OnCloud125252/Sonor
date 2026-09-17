@@ -1,5 +1,36 @@
 import Foundation
 
+/// Decides whether the live preview should read the microphone again.
+///
+/// This is the rule that keeps the words on screen still. The engine reads the whole window
+/// again on every pass and returns slightly different words each time, so a pass that nobody
+/// asked for rewrites text the user is still reading.
+enum LivePreviewGate {
+
+    /// What the audio capture looks like at this moment.
+    struct Conditions {
+        let isRecording: Bool
+        let isPaused: Bool
+        let capturedSamples: Int
+        /// Uptime in nanoseconds when the microphone last heard a voice. Zero means never.
+        let lastVoiceUptime: UInt64
+    }
+
+    /// Below one second the buffer holds little more than noise, and the model invents words.
+    static let minimumSamples = 16_000
+
+    /// True when a new pass is worth its cost.
+    ///
+    /// The last test is the one that matters: a pass runs only when the microphone heard a
+    /// voice since the pass before. The buffer keeps growing while the room is silent, so a
+    /// test on the sample count alone let the engine run for ever on the same quiet audio.
+    static func shouldRun(_ conditions: Conditions, lastPassUptime: UInt64) -> Bool {
+        guard conditions.isRecording, !conditions.isPaused else { return false }
+        guard conditions.capturedSamples >= minimumSamples else { return false }
+        return conditions.lastVoiceUptime > lastPassUptime
+    }
+}
+
 /// Runs the transcription engine again and again while the user speaks, so the HUD can show
 /// the words before the recording stops.
 ///
@@ -15,8 +46,6 @@ final class LivePreviewService {
     /// Shortest gap between two passes. The preview model reads a window in well under a
     /// second, so the gap only decides how soon a new voice reaches the screen.
     private static let gap: Duration = .milliseconds(150)
-    /// Below one second the buffer holds little more than noise, and the model invents words.
-    private static let minimumSamples = 16_000
 
     private var task: Task<Void, Never>?
 
@@ -35,14 +64,13 @@ final class LivePreviewService {
                 guard !Task.isCancelled else { return }
 
                 let audio = AudioManager.shared
-                guard audio.isRecording, !audio.isPaused else { continue }
-                guard audio.capturedSampleCount >= Self.minimumSamples else { continue }
-
-                // A pass runs only when the microphone heard a voice since the pass before.
-                // The engine reads the whole window again every time, and it returns slightly
-                // different words each time. Without this test the text on screen keeps
-                // changing while the user says nothing.
-                guard audio.lastVoiceUptime > lastPassUptime else { continue }
+                let conditions = LivePreviewGate.Conditions(
+                    isRecording: audio.isRecording,
+                    isPaused: audio.isPaused,
+                    capturedSamples: audio.capturedSampleCount,
+                    lastVoiceUptime: audio.lastVoiceUptime
+                )
+                guard LivePreviewGate.shouldRun(conditions, lastPassUptime: lastPassUptime) else { continue }
                 lastPassUptime = DispatchTime.now().uptimeNanoseconds
 
                 let samples = audio.snapshotSamples(maxSeconds: Self.windowSeconds)

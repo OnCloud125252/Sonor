@@ -398,10 +398,21 @@ class AudioManager: ObservableObject {
         let maxCount = Int(maxSeconds * Double(sampleRate))
         let threshold = levelLock.withLock { $0.threshold }
 
-        let samples = samplesQueue.sync { accumulatedSamples }
-        guard samples.count > maxCount else { return samples }
-        return AudioManager.recentSpeech(in: samples, maxCount: maxCount, sampleRate: sampleRate, threshold: threshold)
+        // Only the tail is copied, and it is copied into a buffer of its own. Handing back the
+        // whole array made the next append copy every sample already recorded, because the two
+        // then shared one buffer. That cost grew with every second of the dictation.
+        let searchLimit = maxCount * AudioManager.silenceSearchFactor
+        let window: [Float] = samplesQueue.sync {
+            let start = max(0, accumulatedSamples.count - searchLimit)
+            return Array(accumulatedSamples[start...])
+        }
+        guard window.count > maxCount else { return window }
+        return AudioManager.recentSpeech(in: window, maxCount: maxCount, sampleRate: sampleRate, threshold: threshold)
     }
+
+    /// How much audio the silence search may look through, as a multiple of the window.
+    /// A bound keeps one preview pass cheap however long the dictation runs.
+    static let silenceSearchFactor = 3
 
     /// Frame length used to look for silence. 100 ms is short enough to sit between words and
     /// long enough to be cheap.
@@ -441,6 +452,13 @@ class AudioManager: ObservableObject {
                 collected += end - start
             }
             end = start
+        }
+
+        // The threshold can end up above the whole recording, for example when the room grew
+        // louder while the user spoke. Cutting on a wrong threshold would hand back a fraction
+        // of a second, so the plain newest window wins whenever too little survived.
+        guard collected >= maxCount / 2 else {
+            return Array(samples.suffix(maxCount))
         }
 
         var result = [Float]()
@@ -536,12 +554,16 @@ class AudioManager: ObservableObject {
                 let shouldPublish = levelLock.withLock { state -> Bool in
                     state.level = rms
                     state.peak = max(state.peak, rms)
+                    let previousThreshold = VoiceActivity.threshold(manual: state.manualThreshold, noiseFloor: state.noiseFloor)
                     if state.noiseFloor == 0 {
                         state.noiseFloor = rms
                     } else if rms < state.noiseFloor {
                         state.noiseFloor += (rms - state.noiseFloor) * 0.2
-                    } else {
-                        // The floor rises slowly, so speech cannot drag it up with it.
+                    } else if rms < previousThreshold {
+                        // Only a quiet frame raises the floor. Letting every loud frame raise
+                        // it made the floor climb toward the speaker during a long dictation,
+                        // until the speaker fell below their own threshold and the preview
+                        // kept nothing but the last words.
                         state.noiseFloor += (rms - state.noiseFloor) * 0.002
                     }
                     let threshold = VoiceActivity.threshold(manual: state.manualThreshold, noiseFloor: state.noiseFloor)
