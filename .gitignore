@@ -70,3 +70,7 @@ fastlane/test_output
 /docs/
 /Resources/
 /scratch/
+
+# Local signing identity
+#
+/Config/Developer.xcconfig

@@ -1,0 +1,16 @@
+// Shared build settings for every Sonor target.
+//
+// Signing needs an Apple Team ID, and a team ID belongs to one developer.
+// It does not belong in the project file. Put yours in Developer.xcconfig,
+// which git ignores.
+//
+//     cp Config/Developer.xcconfig.example Config/Developer.xcconfig
+//
+// Without that file the build signs the app to run on this Mac only. That
+// is enough to build, run and debug. It is not enough to ship.
+
+CODE_SIGN_STYLE = Automatic
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+
+#include? "Developer.xcconfig"

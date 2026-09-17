@@ -1,0 +1,9 @@
+// Copy this file to Developer.xcconfig and fill in your Apple Team ID.
+//
+//     cp Config/Developer.xcconfig.example Config/Developer.xcconfig
+//
+// Find the ID at https://developer.apple.com/account under Membership.
+// git ignores Developer.xcconfig, so your ID stays on your machine.
+
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+CODE_SIGN_IDENTITY = Apple Development
