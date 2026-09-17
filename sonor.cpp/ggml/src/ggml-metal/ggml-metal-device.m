@@ -1373,13 +1373,12 @@ static bool ggml_metal_buffer_rset_init(ggml_metal_buffer_t buf) {
 
 #if defined(GGML_METAL_HAS_RESIDENCY_SETS)
     if (@available(macOS 15.0, iOS 18.0, tvOS 18.0, visionOS 2.0, *)) {
+        // Sonor deploys to macOS 14.6, and MTLResidencySetDescriptor arrived in macOS 15.0.
+        // A direct class reference makes the linker bind the symbol, which breaks the older
+        // system. Look the class up by name, and set its properties through key-value coding.
         Class descClass = NSClassFromString(@"MTLResidencySetDescriptor");
         id desc = [[descClass alloc] init];
-        [desc performSelector:@selector(setLabel:) withObject:@"ggml_metal"];
-        // Initial capacity is an NSUInteger property, need to use NSInvocation or KVC, or just cast
-        // To be safe and simple, cast it to an id and use performSelector if possible, but actually we can just cast id to the class type since it's guarded by availability.
-        // Wait, if we cast to (MTLResidencySetDescriptor *), the compiler might still emit a symbol reference.
-        // Let's use KVC:
+        [desc setValue:@"ggml_metal" forKey:@"label"];
         [desc setValue:@(buf->n_buffers) forKey:@"initialCapacity"];
 
         NSError * error;
