@@ -190,18 +190,42 @@ struct GeneralSettingsView: View {
             Text(t("This shortcut is already used by another action."))
         }
     }
-    /// The models the live preview can use.
-    ///
-    /// Only a downloaded multilingual model can run the preview. The `.en` builds read English
-    /// alone, so they would return nothing useful for any other language.
+    /// Every whisper model can run the live preview. Sonor warns about a poor choice instead
+    /// of hiding it, because only the user knows what they are willing to trade.
     private var previewModelChoices: [(id: String, name: String)] {
-        var choices: [(id: String, name: String)] = [("", t("Off"))]
-        for model in modelManager.availableWhisperModels where model.languageSupport == .multilingual {
-            guard case .downloaded = modelManager.whisperStates[model.id] else { continue }
-            choices.append((model.id, model.name))
-        }
-        return choices
+        [("", t("Off"))] + modelManager.availableWhisperModels.map { ($0.id, $0.name) }
     }
+
+    private var selectedPreviewModel: ModelManager.WhisperModel? {
+        modelManager.availableWhisperModels.first { $0.id == previewModelId }
+    }
+
+    private var isPreviewModelDownloaded: Bool {
+        guard let model = selectedPreviewModel else { return false }
+        if case .downloaded = modelManager.whisperStates[model.id] { return true }
+        return false
+    }
+
+    /// What the user has to know about the model they picked, worst news first.
+    private var previewModelWarnings: [String] {
+        guard let model = selectedPreviewModel else { return [] }
+        var warnings: [String] = []
+        if !isPreviewModelDownloaded {
+            warnings.append(t("This model is not on your Mac yet, so the live preview stays empty. Open Models and download it."))
+        }
+        // A preview pass reads the whole window again every time. A heavy model cannot finish
+        // one pass before the next is due, so the words land seconds after they are spoken.
+        if model.expectedSize > GeneralSettingsView.slowPreviewModelBytes {
+            warnings.append(t("This model is large. One preview pass takes seconds, so the words appear well after you say them. A smaller model keeps up."))
+        }
+        if model.languageSupport == .englishOnly {
+            warnings.append(t("This model reads English only. In any other language the preview shows nonsense, but the final text is not affected."))
+        }
+        return warnings
+    }
+
+    /// Above this a preview pass is too slow to keep up with a speaker.
+    private static let slowPreviewModelBytes: Int64 = 300_000_000
 
     /// Lets the user set how loud a sound has to be before Sonor calls it a voice.
     ///
@@ -938,11 +962,16 @@ struct GeneralSettingsView: View {
                             .foregroundColor(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
 
-                        if previewModelChoices.count <= 1 {
-                            Text(t("Download Whisper Base (Multilingual) in Models to use the live preview."))
-                                .font(.system(size: 12))
-                                .foregroundColor(.orange)
-                                .fixedSize(horizontal: false, vertical: true)
+                        ForEach(previewModelWarnings, id: \.self) { warning in
+                            HStack(alignment: .top, spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 10))
+                                    .padding(.top, 2)
+                                Text(warning)
+                                    .font(.system(size: 12))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .foregroundColor(.orange)
                         }
                     }
                 }
