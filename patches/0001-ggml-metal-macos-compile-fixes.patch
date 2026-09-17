@@ -1,0 +1,39 @@
+--- a/sonor.cpp/ggml/src/ggml-metal/ggml-metal.metal	2026-09-17 18:13:03
++++ b/sonor.cpp/ggml/src/ggml-metal/ggml-metal.metal	2026-09-17 18:13:03
+@@ -5005,9 +5005,6 @@
+     }
+ }
+ 
+-static inline float bilinear_tri(float x) {
+-    return MAX(0.0f, 1.0f - fabs(x));
+-}
+ 
+ kernel void kernel_upscale_bilinear_f32(
+     constant ggml_metal_kargs_upscale & args,
+@@ -5056,7 +5053,7 @@
+                 for (int64_t sx = x_min; sx < x_max; ++sx) {
+                     const float wx = MAX(0.0f, 1.0f - fabs((float)sx - f00) * invscale0);
+                     const float w  = wx * wy;
+-                    const device const float * src_ptr = (device const float *)(src0 + sy*args.nb01 + sx*args.nb00);
++                    device const float * src_ptr = (device const float *)(src0 + sy*args.nb01 + sx*args.nb00);
+                     sum  += (*src_ptr) * w;
+                     wsum += w;
+                 }
+@@ -5214,7 +5211,7 @@
+     const float w_y2 = bicubic_weight1(1.0f - fd1);
+     const float w_y3 = bicubic_weight2(2.0f - fd1);
+ 
+-    const device const char * src_slice = src0 + i03 * args.nb03 + i02 * args.nb02;
++    device const char * src_slice = src0 + i03 * args.nb03 + i02 * args.nb02;
+ 
+     device float * dst_ptr = (device float *)(dst + i3 * args.nb3 + i2 * args.nb2 + i1 * args.nb1);
+ 
+@@ -5238,7 +5235,7 @@
+                 const int64_t ix = MAX(0, MIN(args.ne00 - 1, i00 + dx));
+                 const float wx = (dx == -1) ? w_x0 : (dx == 0) ? w_x1 : (dx == 1) ? w_x2 : w_x3;
+ 
+-                const device const float * src_ptr = (device const float *)(src_slice + iy * args.nb01 + ix * args.nb00);
++                device const float * src_ptr = (device const float *)(src_slice + iy * args.nb01 + ix * args.nb00);
+                 sum += (*src_ptr) * wx * wy;
+             }
+         }
