@@ -11,7 +11,6 @@
 		34AC90E36DE79EEDDC3A0381 /* MLXHuggingFace in Frameworks */ = {isa = PBXBuildFile; productRef = A443AD55CB178B6FA2B4E2F3 /* MLXHuggingFace */; };
 		4586A2E16FE5CEBBC5899C24 /* MLXLMCommon in Frameworks */ = {isa = PBXBuildFile; productRef = 1E178648712FE46F9D04CBE4 /* MLXLMCommon */; };
 		482F589EE138F7AEFCCE8E21 /* MLXLLM in Frameworks */ = {isa = PBXBuildFile; productRef = 1092FF3974AADB49E848C373 /* MLXLLM */; };
-		62FDD38207C55F4EDC46CAC1 /* libcommon.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E0E7886FB9FD6910C0275599 /* libcommon.a */; };
 		66A007DAC5E714C7E96D4F3D /* libsonor.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2DB97A1F4E8F6964374F581A /* libsonor.a */; };
 		8D7DC2017BA3ED6F2241D376 /* libggml-cpu.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 70A66B13DBED0B3A9B364DB1 /* libggml-cpu.a */; };
 		9892EA6D96893814CFA17626 /* libggml.a in Frameworks */ = {isa = PBXBuildFile; fileRef = E1EA5827898EEA79140E2A01 /* libggml.a */; };
@@ -66,7 +65,6 @@
 		732C02653E6EC2CA525AA5D3 /* Hub.framework.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Hub.framework.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		A6DE841373F71179C261389B /* Tokenizers.framework.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Tokenizers.framework.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB1AA0FCF32E5D0BEB429EDB /* ggml-metal.metal */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.metal; name = "ggml-metal.metal"; path = "sonor.cpp/ggml/src/ggml-metal/ggml-metal.metal"; sourceTree = "<group>"; };
-		E0E7886FB9FD6910C0275599 /* libcommon.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; name = libcommon.a; path = sonor.cpp/build/examples/libcommon.a; sourceTree = "<group>"; };
 		E1EA5827898EEA79140E2A01 /* libggml.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; name = libggml.a; path = sonor.cpp/build/ggml/src/libggml.a; sourceTree = "<group>"; };
 		ECDC90A23855A924F67A28E5 /* libggml-metal.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; name = "libggml-metal.a"; path = "sonor.cpp/build/ggml/src/ggml-metal/libggml-metal.a"; sourceTree = "<group>"; };
 		F77AABFA07EF2A44DBC5E6C2 /* libggml-base.a */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = archive.ar; name = "libggml-base.a"; path = "sonor.cpp/build/ggml/src/libggml-base.a"; sourceTree = "<group>"; };
@@ -124,7 +122,6 @@
 				34AC90E36DE79EEDDC3A0381 /* MLXHuggingFace in Frameworks */,
 				D6534C6F29F8B7E2B6DA47D2 /* Hub in Frameworks */,
 				DA1A18BC76D9C0AAE959D6C7 /* Tokenizers in Frameworks */,
-				62FDD38207C55F4EDC46CAC1 /* libcommon.a in Frameworks */,
 				20AD0982A184F56E02F13629 /* libggml-blas.a in Frameworks */,
 				D9C0161012AA64376FF682C3 /* libggml-metal.a in Frameworks */,
 				C0559876D8BD50DD812A8D0F /* libggml-base.a in Frameworks */,
@@ -155,7 +152,6 @@
 		0A1FB2BD597FAAD0B9FBA2F3 /* Libraries */ = {
 			isa = PBXGroup;
 			children = (
-				E0E7886FB9FD6910C0275599 /* libcommon.a */,
 				078E4201C255A0EEA854DC37 /* libggml-blas.a */,
 				ECDC90A23855A924F67A28E5 /* libggml-metal.a */,
 				F77AABFA07EF2A44DBC5E6C2 /* libggml-base.a */,
@@ -202,11 +198,34 @@
 		};
 /* End PBXGroup section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		FA50B01D2FCE9A0100E5D001 /* Build sonor.cpp */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build sonor.cpp";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "\"$SRCROOT/scripts/build-engine.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXNativeTarget section */
 		FA21F5502FA973670030EE83 /* Sonor */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = FA21F5722FA973680030EE83 /* Build configuration list for PBXNativeTarget "Sonor" */;
 			buildPhases = (
+				FA50B01D2FCE9A0100E5D001 /* Build sonor.cpp */,
 				FA21F54D2FA973670030EE83 /* Sources */,
 				FA21F54E2FA973670030EE83 /* Frameworks */,
 				FA21F54F2FA973670030EE83 /* Resources */,
@@ -429,7 +448,7 @@
 				DEVELOPMENT_TEAM = B8R3X8NN3X;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -494,7 +513,7 @@
 				DEVELOPMENT_TEAM = B8R3X8NN3X;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -548,21 +567,14 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
-					"$(SRCROOT)/sonor.cpp/build/src",
-					"$(SRCROOT)/sonor.cpp/build/ggml/src",
-					"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-metal",
-					"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-blas",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/sonor.cpp/build/src",
 					"$(SRCROOT)/sonor.cpp/build/ggml/src",
+					"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-cpu",
 					"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-metal",
 					"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-blas",
-					"$(PROJECT_DIR)/sonor.cpp/build/ggml/src",
-					"$(PROJECT_DIR)/sonor.cpp/build/src",
-					"\"$(SRCROOT)/sonor.cpp/build/examples\"",
-					"\"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-cpu\"",
 				);
 				MACH_O_TYPE = mh_execute;
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
@@ -626,21 +638,14 @@
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
-					"$(SRCROOT)/sonor.cpp/build/src",
-					"$(SRCROOT)/sonor.cpp/build/ggml/src",
-					"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-metal",
-					"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-blas",
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(inherited)",
 					"$(SRCROOT)/sonor.cpp/build/src",
 					"$(SRCROOT)/sonor.cpp/build/ggml/src",
+					"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-cpu",
 					"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-metal",
 					"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-blas",
-					"$(PROJECT_DIR)/sonor.cpp/build/ggml/src",
-					"$(PROJECT_DIR)/sonor.cpp/build/src",
-					"\"$(SRCROOT)/sonor.cpp/build/examples\"",
-					"\"$(SRCROOT)/sonor.cpp/build/ggml/src/ggml-cpu\"",
 				);
 				MACH_O_TYPE = mh_execute;
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
