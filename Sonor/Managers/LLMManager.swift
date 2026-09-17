@@ -119,6 +119,9 @@ final class LLMManager: ObservableObject {
             lastAPIError = nil
             return result.wasTruncated ? .truncated(result.text) : .refined(result.text)
         } catch {
+            // The caller stopped the stream, so the service did nothing wrong. Reporting this
+            // as an API error would leave a false failure in the model settings.
+            if Task.isCancelled { return .refined(text) }
             let message = error.localizedDescription
             lastAPIError = message
             return .failed(transcript: text, message: message)

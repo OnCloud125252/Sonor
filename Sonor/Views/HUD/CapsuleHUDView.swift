@@ -78,6 +78,10 @@ struct CapsuleHUDView: View {
     private var showsCancel: Bool {
         !isInitializing && !isFinalState
     }
+    /// The user can drop the rewrite while it runs and keep the words they spoke.
+    private var showsSkipRefine: Bool {
+        controller.isRefining && !isInitializing && !isFinalState
+    }
     private var showsSelector: Bool {
         LLMManager.shared.isAvailable && !isInitializing && !isFinalState && controller.isRecording
     }
@@ -93,6 +97,7 @@ struct CapsuleHUDView: View {
         let step = HUDMetrics.roundControlWidth + HUDMetrics.controlGap
         var taken: CGFloat = 0
         if showsPause { taken += step }
+        if showsSkipRefine { taken += step }
         if controller.canRetryTranscription { taken += step }
         if showsCancel { taken += step }
         if showsSelector { taken += HUDMetrics.assistantWidth + HUDMetrics.controlGap }
@@ -190,12 +195,11 @@ struct CapsuleHUDView: View {
     /// Turns the status into words a reader understands.
     ///
     /// `statusText` also drives app state, so the strings themselves cannot change. This maps
-    /// them for the screen only. "Streaming" and "Processing" describe the machine. The user
+    /// them for the screen only. "Processing" and "Modifying" describe the machine. The user
     /// wants to know what is happening to their words.
     private func statusLabel(_ status: String) -> String {
         switch status {
         case "Processing": return "Reading your voice"
-        case "Streaming": return "Typing it out"
         case "Modifying": return "Improving the text"
         case "Done!": return "Pasted"
         case "No text recognized.": return "Heard nothing"
@@ -558,6 +562,19 @@ struct CapsuleHUDView: View {
         }
     }
 
+    /// Stops the rewrite and types the plain transcript.
+    ///
+    /// It sits beside pause on purpose. Pause only shows while the microphone runs, and this
+    /// only shows after it stops, so the two are never on the line together.
+    @ViewBuilder
+    private var skipRefineButton: some View {
+        if showsSkipRefine {
+            roundButton("forward.end.fill", size: 14, weight: .medium) {
+                controller.skipRefinement()
+            }
+        }
+    }
+
     @ViewBuilder
     private var retryButton: some View {
         if controller.canRetryTranscription {
@@ -587,6 +604,7 @@ struct CapsuleHUDView: View {
             if !showsOnlyTranscript {
                 HStack(spacing: HUDMetrics.controlGap) {
                     pauseButton
+                    skipRefineButton
                     retryButton
                     mainCapsule
                     assistantTag(width: HUDMetrics.assistantWidth, height: HUDMetrics.controlHeight)
@@ -666,6 +684,11 @@ struct CapsuleHUDView: View {
             withAnimation(.spring(response: 0.5, dampingFraction: 0.6, blendDuration: 0.3)) {
                 width = targetWidth
                 isProcessing = controller.statusText != "Listening..." && controller.statusText != "Paused"
+            }
+        }
+        .onChange(of: controller.isRefining) {
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.6, blendDuration: 0.3)) {
+                width = targetWidth
             }
         }
         .onChange(of: controller.statusText) {

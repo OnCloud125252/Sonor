@@ -235,12 +235,47 @@ struct MainAppView: View {
 
 
 
-enum RecordingHotkeyType: String {
+enum RecordingHotkeyType: String, CaseIterable {
     case main = "main"
     case cancel = "cancel"
     case pause = "pause"
     case assistant = "assistant"
     case paste = "paste"
+    case skipRefine = "skipRefine"
+
+    /// Control plus Option. Every shortcut that ships with a key uses this pair.
+    private static let controlOption = 0x1800
+
+    /// Key code the shortcut starts on. `-1` means the shortcut starts unset.
+    var defaultKeyCode: Int {
+        switch self {
+        case .main: return 49
+        case .cancel: return 6
+        case .pause: return 7
+        case .assistant: return 8
+        case .paste, .skipRefine: return -1
+        }
+    }
+
+    var defaultModifiers: Int {
+        defaultKeyCode == -1 ? 0 : RecordingHotkeyType.controlOption
+    }
+
+    /// What the settings screen shows before the user records a shortcut.
+    var defaultDisplayString: String {
+        switch self {
+        case .main: return "Ctrl + Opt + Space"
+        case .cancel: return "Ctrl + Opt + Z"
+        case .pause: return "Ctrl + Opt + X"
+        case .assistant: return "Ctrl + Opt + C"
+        case .paste, .skipRefine: return "None"
+        }
+    }
+
+    // The start shortcut shipped before the others, so its keys carry no suffix.
+    var keyCodeDefaultsKey: String { self == .main ? "hotkeyCode" : "hotkeyCode_\(rawValue)" }
+    var modifiersDefaultsKey: String { self == .main ? "hotkeyModifiers" : "hotkeyModifiers_\(rawValue)" }
+    var displayStringDefaultsKey: String { self == .main ? "hotkeyString" : "hotkeyString_\(rawValue)" }
 }
 
 

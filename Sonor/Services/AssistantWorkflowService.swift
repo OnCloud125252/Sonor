@@ -3,12 +3,37 @@ import AppKit
 @preconcurrency import ApplicationServices
 import SwiftUI
 import NaturalLanguage
+import os
 
 @MainActor
 class AssistantWorkflowService {
     static let shared = AssistantWorkflowService()
     
     private init() {}
+
+    /// True while a rewrite runs and the user can still stop it.
+    private(set) var isRefining = false
+    /// Set when the user asked to stop the rewrite and keep the plain transcript.
+    ///
+    /// The token callback runs outside the main actor, so the flag is held behind a lock
+    /// instead of on the actor.
+    private let skipRefinementRequested = OSAllocatedUnfairLock(initialState: false)
+    /// The running rewrite, held so the user can stop it.
+    private var refinementTask: Task<LLMRefinement, Never>?
+
+    /// Stops the rewrite that runs now. The workflow then types the plain transcript.
+    ///
+    /// The half finished rewrite is dropped on purpose. A model stopped in the middle of a
+    /// sentence writes text the user never read, while the words they spoke are already whole.
+    ///
+    /// The task is cancelled as well as flagged. A cloud model can think for a minute before
+    /// it sends the first token, and a flag that only the token callback reads would leave the
+    /// user waiting for exactly the model they asked to skip.
+    func skipRefinement() {
+        guard isRefining else { return }
+        skipRefinementRequested.withLock { $0 = true }
+        refinementTask?.cancel()
+    }
     
     /// Orchestrates the entire post-transcription workflow, including optional LLM modifications,
     /// pasting text via Accessibility (AX) APIs, or falling back to the clipboard.
@@ -23,7 +48,9 @@ class AssistantWorkflowService {
         onCopyNotificationTrigger: @escaping @MainActor (String) -> Void,
         /// Reports the assistant output while it grows, so the HUD can draw the edit.
         /// The second value is true only for the finished text.
-        onAssistantText: @escaping @MainActor (String, Bool) -> Void = { _, _ in }
+        onAssistantText: @escaping @MainActor (String, Bool) -> Void = { _, _ in },
+        /// Reports whether a rewrite runs now, so the HUD can offer to stop it.
+        onRefiningChange: @escaping @MainActor (Bool) -> Void = { _ in }
     ) async {
         
         var frontmostPID = NSRunningApplication.current.processIdentifier
@@ -33,9 +60,6 @@ class AssistantWorkflowService {
         }
         
         let isTextFieldDetected = isBackgroundRetry ? false : PasteManager.shared.isTextFieldFocused(pid: frontmostPID)
-        
-        // willPaste: only paste if a text field was actually found
-        var willPaste = isBackgroundRetry ? false : isTextFieldDetected
         
         let shouldRunLLM = !selectedMode.prompt.isEmpty
         /// Set when the rewrite did not finish cleanly. The transcript still reaches the user,
@@ -146,77 +170,74 @@ class AssistantWorkflowService {
             let systemPrompt = buildSystemPrompt(selectedMode: selectedMode, detectedLanguage: detectedLang)
             if Task.isCancelled { return }
             
-            if willPaste {
-                if let targetApp = NSRunningApplication(processIdentifier: frontmostPID) {
-                    targetApp.activate(options: .activateAllWindows)
-                    var attempts = 0
-                    while !targetApp.isActive && attempts < 10 {
-                        try? await Task.sleep(nanoseconds: 50_000_000)
-                        attempts += 1
-                    }
-                }
-            }
-            
             var didStartStreaming = false
             var fullGeneratedText = ""
-            var streamedText = ""
-            let initialWillPaste = willPaste
             // One hop to the main actor per token would flood it. The panel only needs to
             // keep up with the eye.
             var lastPanelUpdate = CFAbsoluteTimeGetCurrent()
             let panelUpdateInterval: CFAbsoluteTime = 0.1
-            
-            let llmResult = await LLMManager.shared.cleanStream(text: correctedText, systemPrompt: systemPrompt, mode: selectedMode) { token in
-                fullGeneratedText += token
-                let now = CFAbsoluteTimeGetCurrent()
-                if now - lastPanelUpdate >= panelUpdateInterval {
-                    lastPanelUpdate = now
-                    let snapshot = fullGeneratedText
-                    Task { @MainActor in
-                        onAssistantText(snapshot, false)
+
+            // A retry runs with no HUD of its own, so there is no button to stop it. A retry
+            // can also run beside a live dictation, so it must leave the shared skip state
+            // alone. Every use of it below is behind this test.
+            let canSkipRefinement = !isBackgroundRetry
+            let skipFlag = skipRefinementRequested
+            if canSkipRefinement {
+                skipFlag.withLock { $0 = false }
+                isRefining = true
+                onRefiningChange(true)
+            }
+
+            let refinement = Task { @MainActor in
+                await LLMManager.shared.cleanStream(text: correctedText, systemPrompt: systemPrompt, mode: selectedMode) { token in
+                    if canSkipRefinement, skipFlag.withLock({ $0 }) { return false }
+                    fullGeneratedText += token
+                    let now = CFAbsoluteTimeGetCurrent()
+                    if now - lastPanelUpdate >= panelUpdateInterval {
+                        lastPanelUpdate = now
+                        let snapshot = fullGeneratedText
+                        Task { @MainActor in
+                            onAssistantText(snapshot, false)
+                        }
                     }
-                }
-                if !didStartStreaming {
-                    didStartStreaming = true
-                    Task { @MainActor in
-                        if willPaste {
-                            onStatusChange("Streaming")
-                        } else {
+                    if !didStartStreaming {
+                        didStartStreaming = true
+                        Task { @MainActor in
                             onStatusChange(generatingLabel)
                         }
                     }
+                    return true
                 }
-                if willPaste {
-                    let isActive = NSRunningApplication(processIdentifier: frontmostPID)?.isActive ?? false
-                    let stillFocused = isActive && PasteManager.shared.isTextFieldFocused(pid: frontmostPID)
-                    
-                    if !stillFocused {
-                        willPaste = false
-                        Task { @MainActor in
-                            onStatusChange(noFieldLabel)
-                            
-                            // Schedule changing back to generatingLabel after 1.5 seconds if still generating
-                            try? await Task.sleep(nanoseconds: 1_500_000_000)
-                            if isGenerating {
-                                onStatusChange(generatingLabel)
-                            }
-                        }
-                    } else {
-                        streamedText += token
-                        DispatchQueue.global(qos: .userInteractive).async {
-                            PasteManager.shared.typeTextToken(token: token, targetPID: frontmostPID)
-                        }
-                    }
-                }
-                return true
+            }
+            if canSkipRefinement { refinementTask = refinement }
+            // The rewrite runs in its own task so that skipRefinement can stop it. That task
+            // does not inherit cancellation, so the handler passes it down by hand.
+            let llmResult = await withTaskCancellationHandler {
+                await refinement.value
+            } onCancel: {
+                refinement.cancel()
             }
             isGenerating = false
+            var didSkipRefinement = false
+            if canSkipRefinement {
+                refinementTask = nil
+                isRefining = false
+                onRefiningChange(false)
+                didSkipRefinement = skipFlag.withLock { $0 }
+                skipFlag.withLock { $0 = false }
+            }
             if Task.isCancelled { return }
 
-            refinementProblem = llmResult.problem
-            // The model produced nothing, for example when the API call failed. Keep the transcript.
-            if fullGeneratedText.isEmpty {
-                fullGeneratedText = llmResult.text
+            if didSkipRefinement {
+                // The user asked for their own words. A rewrite stopped in the middle is not
+                // text they read, so the part the model wrote goes away.
+                fullGeneratedText = correctedText
+            } else {
+                refinementProblem = llmResult.problem
+                // The model produced nothing, for example when the API call failed. Keep the transcript.
+                if fullGeneratedText.isEmpty {
+                    fullGeneratedText = llmResult.text
+                }
             }
 
             let finishedText = fullGeneratedText
@@ -227,43 +248,27 @@ class AssistantWorkflowService {
             let finalPID = frontmostPID
             let finalFocused = isBackgroundRetry ? false : PasteManager.shared.isTextFieldFocused(pid: finalPID)
             
-            let willDoFinalPaste = isBackgroundRetry ? false : (finalFocused && (!initialWillPaste || !willPaste))
-            let actuallyPasted = (initialWillPaste && willPaste) || willDoFinalPaste
+            let actuallyPasted = finalFocused && !fullGeneratedText.isEmpty
             let fallbackBehavior = selectedMode.fallbackBehavior ?? "overlay"
             let willFallback = !actuallyPasted && fallbackBehavior == "clipboard" && !isBackgroundRetry
             let willShowOverlay = !actuallyPasted && fallbackBehavior == "overlay" && !isBackgroundRetry
             
             if actuallyPasted {
-                if willDoFinalPaste {
-                    if let targetApp = NSRunningApplication(processIdentifier: finalPID), !targetApp.isActive {
-                        targetApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-                        var attempts = 0
-                        while !targetApp.isActive && attempts < 10 {
-                            try? await Task.sleep(nanoseconds: 50_000_000)
-                            attempts += 1
-                        }
+                if let targetApp = NSRunningApplication(processIdentifier: finalPID), !targetApp.isActive {
+                    targetApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                    var attempts = 0
+                    while !targetApp.isActive && attempts < 10 {
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                        attempts += 1
                     }
-                    var textToPaste = fullGeneratedText
-                    if initialWillPaste && !streamedText.isEmpty {
-                        if let currentFieldText = PasteManager.shared.readFocusedTextField(pid: finalPID), currentFieldText.contains(streamedText) {
-                            textToPaste = String(fullGeneratedText.dropFirst(streamedText.count))
-                        }
-                    }
-                    if !textToPaste.isEmpty {
-                        await Task.detached(priority: .userInitiated) {
-                            PasteManager.shared.typeTextDirectly(text: textToPaste, targetPID: finalPID, forceFocusElement: nil)
-                            if let action = selectedMode.postPasteAction, action != "none" {
-                                PasteManager.shared.simulatePostPasteAction(action: action, targetPID: finalPID)
-                            }
-                        }.value
-                    }
-                } else {
-                    await Task.detached(priority: .userInitiated) {
-                        if let action = selectedMode.postPasteAction, action != "none" {
-                            PasteManager.shared.simulatePostPasteAction(action: action, targetPID: finalPID)
-                        }
-                    }.value
                 }
+                let textToPaste = fullGeneratedText
+                await Task.detached(priority: .userInitiated) {
+                    PasteManager.shared.typeTextDirectly(text: textToPaste, targetPID: finalPID, forceFocusElement: nil)
+                    if let action = selectedMode.postPasteAction, action != "none" {
+                        PasteManager.shared.simulatePostPasteAction(action: action, targetPID: finalPID)
+                    }
+                }.value
             } else if willFallback {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(fullGeneratedText, forType: .string)
@@ -285,15 +290,16 @@ class AssistantWorkflowService {
             if let historyMessageID = historyMessageID {
                 let appName: String? = isBackgroundRetry ? nil : (actuallyPasted ? (NSRunningApplication(processIdentifier: finalPID)?.localizedName ?? "Unknown App") : (willFallback ? LocalizationManager.shared.translate("Clipboard") : LocalizationManager.shared.translate("None")))
                 let whisperModel = TranscriptionManager.shared.activeModelName
-                let llmModel = LLMManager.shared.activeModelLabel(for: selectedMode)
+                // A stopped rewrite left no mark on the text, so no model is named for it.
+                let llmModel = didSkipRefinement ? nil : LLMManager.shared.activeModelLabel(for: selectedMode)
                 MessageMemoryManager.shared.updateMessage(id: historyMessageID, newText: fullGeneratedText, isError: refinementProblem != nil, appName: appName, transcriptionModel: whisperModel, llmModel: llmModel, modeName: selectedMode.name, updateMetadata: true)
             } else {
                 let appName = actuallyPasted ? (NSRunningApplication(processIdentifier: finalPID)?.localizedName ?? "Unknown App") : (willFallback ? LocalizationManager.shared.translate("Clipboard") : LocalizationManager.shared.translate("None"))
                 let whisperModel = TranscriptionManager.shared.activeModelName
-                let llmModel = LLMManager.shared.activeModelLabel(for: selectedMode)
+                let llmModel = didSkipRefinement ? nil : LLMManager.shared.activeModelLabel(for: selectedMode)
                 MessageMemoryManager.shared.saveMessage(fullGeneratedText, samples: audioSamples, appName: appName, transcriptionModel: whisperModel, llmModel: llmModel, modeName: selectedMode.name)
             }
-            if finalFocused || initialWillPaste {
+            if finalFocused {
                 await MainActor.run {
                     onAutoLearnTrigger(finalPID, fullGeneratedText)
                 }

@@ -47,8 +47,7 @@ class AppController: NSObject, ObservableObject {
     
     @Published var isRecording = false {
         didSet {
-            // Shortcuts bound to a bare character key are only claimed while a recording runs.
-            HotkeyManager.shared.setRecordingActive(isRecording)
+            updateDictationActive()
         }
     }
     @Published var activeDictionaryNotification: DictionaryNotification? = nil
@@ -65,6 +64,18 @@ class AppController: NSObject, ObservableObject {
     @Published var failedSelectedMode: VoiceMode? = nil
     var failedHistoryMessageID: UUID? = nil
     @Published var canRetryTranscription: Bool = false
+    /// True while the assistant rewrites the transcript and the user can still stop it.
+    @Published private(set) var isRefining = false {
+        didSet {
+            updateDictationActive()
+        }
+    }
+
+    /// Shortcuts bound to a bare character key are only claimed while a dictation is in
+    /// flight. The rewrite counts, because the user can stop it with its own shortcut.
+    private func updateDictationActive() {
+        HotkeyManager.shared.setDictationActive(isRecording || isRefining)
+    }
     
     private var currentRecordingSessionID: UUID? = nil
     private var lastRecordingStopTime: Date = Date.distantPast
@@ -191,6 +202,9 @@ class AppController: NSObject, ObservableObject {
         }
         HotkeyManager.shared.onAssistantKeyDown = { [weak self] in
             self?.selectNextMode()
+        }
+        HotkeyManager.shared.onSkipRefineKeyDown = { [weak self] in
+            self?.skipRefinement()
         }
         HotkeyManager.shared.onPasteKeyDown = { [weak self] in
             guard let self = self, let text = self.lastTranscription, !text.isEmpty else { return }
@@ -440,6 +454,12 @@ class AppController: NSObject, ObservableObject {
     }
 
 
+    /// Stops the assistant rewrite and types the plain transcript instead.
+    func skipRefinement() {
+        guard isRefining else { return }
+        AssistantWorkflowService.shared.skipRefinement()
+    }
+
     func togglePause() {
         guard isRecording else { 
             return 
@@ -471,6 +491,7 @@ class AppController: NSObject, ObservableObject {
         guard isRecording || isCurrentlyProcessing else { return }
         isRecording = false
         self.isPaused = false
+        self.isRefining = false
         self.currentRecordingSessionID = nil
         self.lastRecordingStopTime = Date()
         statusText = "Cancelled"
@@ -628,6 +649,11 @@ class AppController: NSObject, ObservableObject {
                 onAssistantText: { text, isFinal in
                     if !isInlineRetry {
                         self.transcriptStore.updateAssistant(text, isFinal: isFinal)
+                    }
+                },
+                onRefiningChange: { isRefining in
+                    if !isInlineRetry {
+                        self.isRefining = isRefining
                     }
                 }
             )

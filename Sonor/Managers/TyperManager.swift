@@ -95,18 +95,6 @@ class PasteManager {
         return isElementTextField(element)
     }
 
-    func readFocusedTextField(pid: pid_t) -> String? {
-        guard AXIsProcessTrusted() else { return nil }
-        guard let element = getFocusedAXElement(pid: pid) else { return nil }
-        
-        var currentValue: AnyObject?
-        if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &currentValue) == .success {
-            return currentValue as? String
-        }
-        return nil
-    }
-
-
     func typeTextDirectly(text: String, targetPID: pid_t, forceFocusElement: AXUIElement? = nil) {
         guard AXIsProcessTrusted() else {
             return
@@ -144,42 +132,6 @@ class PasteManager {
         event?.post(tap: .cghidEventTap)
     }
 
-
-    func typeTextToken(token: String, targetPID: pid_t) {
-        guard AXIsProcessTrusted() else {
-            return
-        }
-        let source = CGEventSource(stateID: .combinedSessionState)
-        
-        // Handle newlines with Shift+Enter to avoid accidental form submissions
-        let components = token.components(separatedBy: .newlines)
-        for (index, component) in components.enumerated() {
-            if index > 0 {
-                // Type Shift+Enter
-                let enterDown = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: true)
-                let enterUp = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: false)
-                enterDown?.flags = .maskShift
-                enterUp?.flags = .maskShift
-                
-                enterDown?.post(tap: .cghidEventTap)
-                Thread.sleep(forTimeInterval: 0.01)
-                enterUp?.post(tap: .cghidEventTap)
-                Thread.sleep(forTimeInterval: 0.01)
-            }
-            
-            if !component.isEmpty {
-                let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
-                let utf16Chars = Array(component.utf16)
-                utf16Chars.withUnsafeBufferPointer { buffer in
-                    if let ptr = buffer.baseAddress {
-                        event?.keyboardSetUnicodeString(stringLength: utf16Chars.count, unicodeString: ptr)
-                    }
-                }
-                event?.post(tap: .cghidEventTap)
-                Thread.sleep(forTimeInterval: 0.01)
-            }
-        }
-    }
 
     func simulatePostPasteAction(action: String, targetPID: pid_t) {
         guard AXIsProcessTrusted(), targetPID > 0 else { return }

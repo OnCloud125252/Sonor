@@ -463,9 +463,6 @@ public class LocalizationManager: ObservableObject {
         "Reading your voice": [
             "Reading your voice", "Odczytuję głos", "Stimme wird gelesen", "Leyendo su voz", "Lecture de votre voix", "Leggo la tua voce", "音声を読み取り中", "Lendo sua voz", "正在读取语音"
         ],
-        "Typing it out": [
-            "Typing it out", "Wpisuję tekst", "Text wird eingetippt", "Escribiendo el texto", "Saisie du texte", "Scrivo il testo", "入力中", "Digitando o texto", "正在输入文字"
-        ],
         "Improving the text": [
             "Improving the text", "Poprawiam tekst", "Text wird verbessert", "Mejorando el texto", "Amélioration du texte", "Miglioro il testo", "文章を整えています", "Melhorando o texto", "正在修润文字"
         ],
@@ -4796,17 +4793,6 @@ public class LocalizationManager: ObservableObject {
             "Armazenado apenas na RAM", 
             "仅存储在RAM中", 
         ],
-        "Streaming": [
-            "Streaming", 
-            "Strumieniowanie", 
-            "Streaming", 
-            "Transmisión", 
-            "Flux en direct", 
-            "Streaming", 
-            "ストリーミング", 
-            "Transmissão", 
-            "流式传输", 
-        ],
         "Structured Note": [
             "Structured Note", 
             "Ustrukturyzowana notatka", 
@@ -5873,6 +5859,17 @@ public class LocalizationManager: ObservableObject {
             "最後の文字起こしを貼り付ける", 
             "Colar Última Transcrição", 
             "粘贴最后一次转录"
+        ],
+        "Skip Assistant Rewrite": [
+            "Skip Assistant Rewrite", 
+            "Pomiń poprawki asystenta", 
+            "Überarbeitung überspringen", 
+            "Omitir la reescritura", 
+            "Ignorer la réécriture", 
+            "Salta la riscrittura", 
+            "アシスタントの書き換えをスキップ", 
+            "Ignorar a Reescrita", 
+            "跳过助手改写"
         ],
         "Available Models": [
             "Available Models", 

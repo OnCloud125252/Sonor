@@ -12,6 +12,7 @@ struct GeneralSettingsView: View {
     @AppStorage("hotkeyString_pause") private var hotkeyStringPause = "Ctrl + Opt + X"
     @AppStorage("hotkeyString_assistant") private var hotkeyStringAssistant = "Ctrl + Opt + C"
     @AppStorage("hotkeyString_paste") private var hotkeyStringPaste = "None"
+    @AppStorage("hotkeyString_skipRefine") private var hotkeyStringSkipRefine = "None"
     @AppStorage("hotkeyMode") private var hotkeyMode: HotkeyMode = .click
     @AppStorage("appTheme") private var appTheme = "system"
     @AppStorage("hudAppearance") private var hudAppearance = "glass"
@@ -503,6 +504,7 @@ struct GeneralSettingsView: View {
                 hotkeyRow(title: "Pause/Resume", type: .pause, hotkeyStringVal: hotkeyStringPause)
                 hotkeyRow(title: "Change Assistant", type: .assistant, hotkeyStringVal: hotkeyStringAssistant)
                 hotkeyRow(title: "Paste Last Transcription", type: .paste, hotkeyStringVal: hotkeyStringPaste)
+                hotkeyRow(title: "Skip Assistant Rewrite", type: .skipRefine, hotkeyStringVal: hotkeyStringSkipRefine)
             }
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: hotkeyMode)
         }
@@ -518,9 +520,9 @@ struct GeneralSettingsView: View {
         )
     }
     private func clearShortcut(for type: RecordingHotkeyType) {
-        let codeKey = type == .main ? "hotkeyCode" : "hotkeyCode_\(type.rawValue)"
-        let modKey = type == .main ? "hotkeyModifiers" : "hotkeyModifiers_\(type.rawValue)"
-        let strKey = type == .main ? "hotkeyString" : "hotkeyString_\(type.rawValue)"
+        let codeKey = type.keyCodeDefaultsKey
+        let modKey = type.modifiersDefaultsKey
+        let strKey = type.displayStringDefaultsKey
         
         UserDefaults.standard.set(-1, forKey: codeKey)
         UserDefaults.standard.set(0, forKey: modKey)
@@ -1288,9 +1290,9 @@ struct GeneralSettingsView: View {
     private func setupEventMonitor() {
         self.eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .flagsChanged]) { event in
             if let recordingType = activeRecordingType {
-                let codeKey = recordingType == .main ? "hotkeyCode" : "hotkeyCode_\(recordingType.rawValue)"
-                let modKey = recordingType == .main ? "hotkeyModifiers" : "hotkeyModifiers_\(recordingType.rawValue)"
-                let strKey = recordingType == .main ? "hotkeyString" : "hotkeyString_\(recordingType.rawValue)"
+                let codeKey = recordingType.keyCodeDefaultsKey
+                let modKey = recordingType.modifiersDefaultsKey
+                let strKey = recordingType.displayStringDefaultsKey
                 if event.type == .flagsChanged {
                     let keyCode = event.keyCode
                     let modifierKeyCodes: Set<UInt16> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
@@ -1443,21 +1445,14 @@ struct GeneralSettingsView: View {
     }
     
     private func isShortcutInUse(keyCode: Int, modifiers: Int, ignoringType: RecordingHotkeyType?) -> Bool {
-        let types: [RecordingHotkeyType] = [.main, .cancel, .pause, .assistant, .paste]
-        for type in types {
+        for type in RecordingHotkeyType.allCases {
             if type == ignoringType { continue }
-            let codeKey = type == .main ? "hotkeyCode" : "hotkeyCode_\(type.rawValue)"
-            let modKey = type == .main ? "hotkeyModifiers" : "hotkeyModifiers_\(type.rawValue)"
-            let strKey = type == .main ? "hotkeyString" : "hotkeyString_\(type.rawValue)"
             
-            let existingStr = UserDefaults.standard.string(forKey: strKey) ?? (type == .main ? "Ctrl + Opt + Space" : (type == .cancel ? "Ctrl + Opt + Z" : (type == .pause ? "Ctrl + Opt + X" : "Ctrl + Opt + C")))
+            let existingStr = UserDefaults.standard.string(forKey: type.displayStringDefaultsKey) ?? type.defaultDisplayString
             if existingStr == "None" { continue }
             
-            let defaultCode = type == .main ? 49 : (type == .cancel ? 6 : (type == .pause ? 7 : 8))
-            let defaultMods = 0x1800
-            
-            let existingCode = UserDefaults.standard.object(forKey: codeKey) as? Int ?? defaultCode
-            let existingMods = UserDefaults.standard.object(forKey: modKey) as? Int ?? defaultMods
+            let existingCode = UserDefaults.standard.object(forKey: type.keyCodeDefaultsKey) as? Int ?? type.defaultKeyCode
+            let existingMods = UserDefaults.standard.object(forKey: type.modifiersDefaultsKey) as? Int ?? type.defaultModifiers
             
             if existingCode == keyCode && existingMods == modifiers {
                 return true
