@@ -65,6 +65,7 @@ private struct HotkeyConfiguration {
     let pause: HotkeyManager.HotkeyDef
     let assistant: HotkeyManager.HotkeyDef
     let paste: HotkeyManager.HotkeyDef
+    let skipRefine: HotkeyManager.HotkeyDef
     let mode: String
 }
 
@@ -82,6 +83,7 @@ class HotkeyManager {
     var onPauseKeyDown: (() -> Void)?
     var onAssistantKeyDown: (() -> Void)?
     var onPasteKeyDown: (() -> Void)?
+    var onSkipRefineKeyDown: (() -> Void)?
     private let session = OSAllocatedUnfairLock<EventTapSession?>(initialState: nil)
     private let configuration = OSAllocatedUnfairLock<HotkeyConfiguration?>(initialState: nil)
     private var isKeyDown = false
@@ -89,6 +91,7 @@ class HotkeyManager {
     private var isPauseKeyDown = false
     private var isAssistantKeyDown = false
     private var isPasteKeyDown = false
+    private var isSkipRefineKeyDown = false
     private var activeIsHoldMode = false
     private var modifierOnlyHotkeyAborted = false
     private var capturedKeys: Set<Int> = []
@@ -111,11 +114,14 @@ class HotkeyManager {
     ]
 
     /// A shortcut with no modifier that also types a character can only be safe while a
-    /// recording is running. Outside a recording the tap must let that key through.
-    private let recordingActive = OSAllocatedUnfairLock(initialState: false)
+    /// dictation is in flight. At any other time the tap must let that key through.
+    ///
+    /// A dictation is in flight while the microphone runs and while the assistant rewrites the
+    /// words after it. The rewrite has its own shortcut, so it has to arm bare keys too.
+    private let dictationActive = OSAllocatedUnfairLock(initialState: false)
 
-    func setRecordingActive(_ active: Bool) {
-        recordingActive.withLock { $0 = active }
+    func setDictationActive(_ active: Bool) {
+        dictationActive.withLock { $0 = active }
     }
     
     private init() {
@@ -181,11 +187,12 @@ class HotkeyManager {
         }
         
         let snapshot = HotkeyConfiguration(
-            main: HotkeyDef(keyCodeKey: "hotkeyCode", modifiersKey: "hotkeyModifiers", stringKey: "hotkeyString", defaultCode: 49, defaultModifiers: 0x1800),
-            cancel: HotkeyDef(keyCodeKey: "hotkeyCode_cancel", modifiersKey: "hotkeyModifiers_cancel", stringKey: "hotkeyString_cancel", defaultCode: 6, defaultModifiers: 0x1800),
-            pause: HotkeyDef(keyCodeKey: "hotkeyCode_pause", modifiersKey: "hotkeyModifiers_pause", stringKey: "hotkeyString_pause", defaultCode: 7, defaultModifiers: 0x1800),
-            assistant: HotkeyDef(keyCodeKey: "hotkeyCode_assistant", modifiersKey: "hotkeyModifiers_assistant", stringKey: "hotkeyString_assistant", defaultCode: 8, defaultModifiers: 0x1800),
-            paste: HotkeyDef(keyCodeKey: "hotkeyCode_paste", modifiersKey: "hotkeyModifiers_paste", stringKey: "hotkeyString_paste", defaultCode: -1, defaultModifiers: 0),
+            main: HotkeyDef(.main),
+            cancel: HotkeyDef(.cancel),
+            pause: HotkeyDef(.pause),
+            assistant: HotkeyDef(.assistant),
+            paste: HotkeyDef(.paste),
+            skipRefine: HotkeyDef(.skipRefine),
             mode: UserDefaults.standard.string(forKey: "hotkeyMode") ?? "Click"
         )
         configuration.withLock { $0 = snapshot }
@@ -241,6 +248,17 @@ class HotkeyManager {
             self.targetModifiers = tm
             self.isOnlyModifier = (finalCode >= 54 && finalCode <= 63)
         }
+
+        /// Reads the shortcut the user saved for this action, or the one it ships with.
+        init(_ type: RecordingHotkeyType) {
+            self.init(
+                keyCodeKey: type.keyCodeDefaultsKey,
+                modifiersKey: type.modifiersDefaultsKey,
+                stringKey: type.displayStringDefaultsKey,
+                defaultCode: type.defaultKeyCode,
+                defaultModifiers: type.defaultModifiers
+            )
+        }
     }
     
     func handleEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -270,6 +288,7 @@ class HotkeyManager {
         let pauseHotkey = config.pause
         let assistantHotkey = config.assistant
         let pasteHotkey = config.paste
+        let skipRefineHotkey = config.skipRefine
 
         if !self.isKeyDown {
             self.activeIsHoldMode = (config.mode == "Hold" || config.mode == "Automatic")
@@ -298,13 +317,13 @@ class HotkeyManager {
             return extra.isSubset(of: ignoredModifiers) && target.isSubset(of: current)
         }
 
-        let isRecording = self.recordingActive.withLock { $0 }
-        /// A bare character key is claimed only while a recording is running. Claiming it all
+        let isDictationActive = self.dictationActive.withLock { $0 }
+        /// A bare character key is claimed only while a dictation is in flight. Claiming it all
         /// the time would swallow that character everywhere in the system.
         func isArmed(_ hotkey: HotkeyDef) -> Bool {
             if !hotkey.targetModifiers.isEmpty { return true }
             if HotkeyManager.nonTypingKeyCodes.contains(hotkey.code) { return true }
-            return isRecording
+            return isDictationActive
         }
         
         if type == .flagsChanged {
@@ -508,6 +527,41 @@ class HotkeyManager {
                     }
                 }
             }
+
+            // Skip Refine Hotkey
+            if skipRefineHotkey.isOnlyModifier {
+                var skipRefineTriggerFlag = NSEvent.ModifierFlags()
+                switch skipRefineHotkey.code {
+                case 54, 55: skipRefineTriggerFlag = .command
+                case 56, 60: skipRefineTriggerFlag = .shift
+                case 58, 61: skipRefineTriggerFlag = .option
+                case 59, 62: skipRefineTriggerFlag = .control
+                default: break
+                }
+
+                if self.isSkipRefineKeyDown && isPressed && code != skipRefineHotkey.code && (changedFlag == nil || !skipRefineHotkey.targetModifiers.contains(changedFlag!)) {
+                    self.modifierOnlyHotkeyAborted = true
+                }
+
+                if code == skipRefineHotkey.code && isPressed {
+                    let activeOthers = modifiers.subtracting(skipRefineTriggerFlag)
+                    if modifiersMatch(skipRefineHotkey.targetModifiers, current: activeOthers) {
+                        if !self.isSkipRefineKeyDown {
+                            self.isSkipRefineKeyDown = true
+                            self.modifierOnlyHotkeyAborted = false
+                        }
+                    }
+                } else if !isPressed && self.isSkipRefineKeyDown {
+                    let releasedTrigger = (code == skipRefineHotkey.code)
+                    let releasedOtherRequired = (changedFlag != nil && skipRefineHotkey.targetModifiers.contains(changedFlag!))
+                    if releasedTrigger || releasedOtherRequired {
+                        self.isSkipRefineKeyDown = false
+                        if !self.modifierOnlyHotkeyAborted {
+                            DispatchQueue.main.async { self.onSkipRefineKeyDown?() }
+                        }
+                    }
+                }
+            }
             
             return passthrough
         }
@@ -528,6 +582,9 @@ class HotkeyManager {
                 self.modifierOnlyHotkeyAborted = true
             }
             if self.isPasteKeyDown && pasteHotkey.isOnlyModifier {
+                self.modifierOnlyHotkeyAborted = true
+            }
+            if self.isSkipRefineKeyDown && skipRefineHotkey.isOnlyModifier {
                 self.modifierOnlyHotkeyAborted = true
             }
             
@@ -559,6 +616,11 @@ class HotkeyManager {
             }
             if !pasteHotkey.isOnlyModifier && code == pasteHotkey.code && modifiersMatch(pasteHotkey.targetModifiers, current: modifiers) && isArmed(pasteHotkey) {
                 DispatchQueue.main.async { self.onPasteKeyDown?() }
+                capturedKeys.insert(code)
+                return nil
+            }
+            if !skipRefineHotkey.isOnlyModifier && code == skipRefineHotkey.code && modifiersMatch(skipRefineHotkey.targetModifiers, current: modifiers) && isArmed(skipRefineHotkey) {
+                DispatchQueue.main.async { self.onSkipRefineKeyDown?() }
                 capturedKeys.insert(code)
                 return nil
             }

@@ -5860,6 +5860,17 @@ public class LocalizationManager: ObservableObject {
             "Colar Última Transcrição", 
             "粘贴最后一次转录"
         ],
+        "Skip Assistant Rewrite": [
+            "Skip Assistant Rewrite", 
+            "Pomiń poprawki asystenta", 
+            "Überarbeitung überspringen", 
+            "Omitir la reescritura", 
+            "Ignorer la réécriture", 
+            "Salta la riscrittura", 
+            "アシスタントの書き換えをスキップ", 
+            "Ignorar a Reescrita", 
+            "跳过助手改写"
+        ],
         "Available Models": [
             "Available Models", 
             "Dostępne modele", 
