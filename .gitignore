@@ -4,22 +4,24 @@ build/
 DerivedData/
 *.hmap
 *.ipa
-*.plist.tmp
-*.xcuserstate
-*.xccheckout
+*.dSYM
+*.dSYM.zip
 *.moved-aside
-*.pin
-*.resolved
+*.xccheckout
+*.xcscmblueprint
+*.plist.tmp
+
+# Per-user Xcode state. Never commit this.
+#
+xcuserdata/
+*.xcuserdatad/
 *.xcuserstate
-*.xcworkspace/
-!default.xcworkspace/
 
 # Swift Package Manager
 #
 .build/
 .swiftpm/
 Packages/
-Package.resolved
 
 # App Store Connect
 #
@@ -31,17 +33,22 @@ fastlane/test_output
 # macOS
 #
 .DS_Store
-*.swp
-*~
 .AppleDouble
 .LSOverride
+*.swp
+*~
 
-# Large Model Files
+# Compiled output
 #
-*.bin
 *.metallib
 *.air
 *.profraw
+
+# Model weights
+#
+*.bin
+*.gguf
+*.mlmodelc
 
 # Environment
 #
@@ -49,29 +56,17 @@ fastlane/test_output
 .env.*
 
 # Local repos (if they are not submodules)
-mlx-examples-repo/
-mlx-swift-lm-repo/
-mlx-swift-repo/
+#
+/mlx-examples-repo/
+/mlx-swift-lm-repo/
+/mlx-swift-repo/
 
 # App artifacts
-Sonor.app/
-# Resources (Keep source graphics but ignore exports if needed)
-# Resources/Icons/Icon Exports/
+#
+/Sonor.app/
 
-# Docs and Resources
-Docs/
-Resources/
-scratch/
-
-# Script and text files
-*.py
-*.txt
-*.rb
-*.sh
-*.js
-*.ts
-*.pl
-*.php
-
-# Scripts that belong to the project, not stray files next to the sources.
-!scripts/*.sh
+# Local notes and scratch space
+#
+/docs/
+/Resources/
+/scratch/
