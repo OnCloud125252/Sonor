@@ -79,6 +79,7 @@ if (SONOR_COREML)
         )
 
     set_target_properties(${TARGET} PROPERTIES FOLDER "libs")
+    install(TARGETS ${TARGET} LIBRARY)
 endif()
 
 if (SONOR_OPENVINO)
@@ -125,7 +126,8 @@ if (SONOR_EXTRA_FLAGS)
     target_compile_options(sonor PRIVATE ${SONOR_EXTRA_FLAGS})
 endif()
 
-target_link_libraries(sonor PUBLIC ggml)
+find_package(Threads REQUIRED)
+target_link_libraries(sonor PUBLIC ggml Threads::Threads)
 
 if (SONOR_COREML)
     target_link_libraries(sonor PRIVATE sonor.coreml)

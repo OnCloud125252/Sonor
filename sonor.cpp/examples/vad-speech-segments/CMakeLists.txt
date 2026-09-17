@@ -1,4 +1,4 @@
-set(TARGET vad-speech-segments)
+set(TARGET sonor-vad-speech-segments)
 add_executable(${TARGET} speech.cpp)
 
 include(DefaultTargetOptions)
