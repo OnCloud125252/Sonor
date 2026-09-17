@@ -18,21 +18,22 @@ class AudioManager: ObservableObject {
     static let shared = AudioManager()
     
     private var audioEngine: AVAudioEngine?
-    private var audioConverter: AVAudioConverter? // Converts raw audio to our target format (16kHz)
     /// Serial queue that serializes ALL engine operations to prevent race conditions.
     private let engineQueue = DispatchQueue(label: "com.sonor.engine", qos: .userInitiated)
     
     @Published var isRecording = false
     @Published var audioLevel: Float = 0.0 // RMS audio level for UI visualizations
-    private var accumulatedSamples: [Float] = []
-    private let samplesQueue = DispatchQueue(label: "com.sonor.samplesQueue")
+    /// Only ever touched inside `samplesQueue`, which serializes the audio thread against the
+    /// main thread. The compiler cannot see that rule, so the property states it here.
+    private nonisolated(unsafe) var accumulatedSamples: [Float] = []
+    private nonisolated let samplesQueue = DispatchQueue(label: "com.sonor.samplesQueue")
     private var isTapInstalled = false
     private let targetFormat: AVAudioFormat?
 
     /// Audio-thread state. The render callback runs on a real-time thread, so every field it
     /// shares with the main thread lives behind this lock instead of a plain stored property.
-    private let levelLock = OSAllocatedUnfairLock(initialState: LevelState())
-    private struct LevelState {
+    private nonisolated let levelLock = OSAllocatedUnfairLock(initialState: LevelState())
+    private nonisolated struct LevelState {
         var isPaused = false
         var level: Float = 0
         var lastPublish: UInt64 = 0
@@ -53,7 +54,7 @@ class AudioManager: ObservableObject {
 
     /// Publishing `audioLevel` on every render callback costs a main-thread hop ~47x/sec.
     /// The waveform samples at 20 Hz, so anything faster is wasted work.
-    private static let levelPublishInterval: UInt64 = 45_000_000
+    private nonisolated static let levelPublishInterval: UInt64 = 45_000_000
 
     var isPaused: Bool {
         get { levelLock.withLock { $0.isPaused } }
@@ -275,9 +276,11 @@ class AudioManager: ObservableObject {
             guard let targetFormat = targetFormat else {
                 return
             }
-            audioConverter = AVAudioConverter(from: inputFormat, to: targetFormat)
+            // The tap keeps its own converter. Reading a shared property from the audio thread
+            // raced with every engine restart, because a restart replaces the converter.
+            guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else { return }
             inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] (buffer, time) in
-                self?.processAudio(buffer: buffer)
+                self?.processAudio(buffer: buffer, converter: converter)
             }
             self.isTapInstalled = true
             engine.prepare()
@@ -300,9 +303,9 @@ class AudioManager: ObservableObject {
                     
                     let newInputNode = newEngine.inputNode
                     let newInputFormat = newInputNode.inputFormat(forBus: 0)
-                    self.audioConverter = AVAudioConverter(from: newInputFormat, to: targetFormat)
+                    guard let newConverter = AVAudioConverter(from: newInputFormat, to: targetFormat) else { return }
                     newInputNode.installTap(onBus: 0, bufferSize: 1024, format: newInputFormat) { [weak self] (buffer, time) in
-                        self?.processAudio(buffer: buffer)
+                        self?.processAudio(buffer: buffer, converter: newConverter)
                     }
                     self.isTapInstalled = true
                     newEngine.prepare()
@@ -331,10 +334,9 @@ class AudioManager: ObservableObject {
             
             if wasTapInstalled {
                 let inputFormat = engine.inputNode.inputFormat(forBus: 0)
-                if let target = self.targetFormat {
-                    self.audioConverter = AVAudioConverter(from: inputFormat, to: target)
+                if let target = self.targetFormat, let converter = AVAudioConverter(from: inputFormat, to: target) {
                     engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] (buffer, time) in
-                        self?.processAudio(buffer: buffer)
+                        self?.processAudio(buffer: buffer, converter: converter)
                     }
                     self.isTapInstalled = true
                     
@@ -543,13 +545,19 @@ class AudioManager: ObservableObject {
 
     /// Receives raw buffers from the audio engine, calculates UI volume levels,
     /// and performs format conversion into `accumulatedSamples`.
-    private func processAudio(buffer: AVAudioPCMBuffer) {
+    ///
+    /// The audio engine calls this on a real-time thread, never on the main actor.
+    private nonisolated func processAudio(buffer: AVAudioPCMBuffer, converter: AVAudioConverter) {
         if levelLock.withLock({ $0.isPaused }) { return }
         autoreleasepool {
             let length = Int(buffer.frameLength)
             if let channelData = buffer.floatChannelData?[0], length > 0 {
-                var rms: Float = 0
-                vDSP_rmsqv(channelData, 1, &rms, vDSP_Length(length))
+                // vDSP writes through an inout pointer, so the reading starts as a var. The
+                // lock closure runs on another thread and may not capture a var, so the
+                // finished reading is copied into a constant first.
+                var measuredRMS: Float = 0
+                vDSP_rmsqv(channelData, 1, &measuredRMS, vDSP_Length(length))
+                let rms = measuredRMS
                 let now = DispatchTime.now().uptimeNanoseconds
                 let shouldPublish = levelLock.withLock { state -> Bool in
                     state.level = rms
@@ -578,30 +586,34 @@ class AudioManager: ObservableObject {
                 }
                 if shouldPublish {
                     DispatchQueue.main.async {
-                        self.audioLevel = rms
+                        MainActor.assumeIsolated { self.audioLevel = rms }
                     }
                 }
             }
             // The settings meter needs the level only. Converting and keeping samples for it
             // would waste the processor and grow a buffer that nobody reads.
             if levelLock.withLock({ $0.isMonitorOnly }) { return }
-            guard let converter = audioConverter, let targetFormat = targetFormat else { return }
+            let targetFormat = converter.outputFormat
             let ratio = targetFormat.sampleRate / buffer.format.sampleRate
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
             guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
             pcmBuffer.frameLength = pcmBuffer.frameCapacity // Prevents AVAudioConverter from returning 0 frames
             
             var error: NSError? = nil
-            var hasData = false
+            // The converter asks for input more than once, and it must get this buffer only
+            // on the first ask. The block may not capture a plain var, so the flag sits here.
+            let hasPendingInput = OSAllocatedUnfairLock(initialState: true)
             let inputBlock: AVAudioConverterInputBlock = { inNumPackets, outStatus in
-                if !hasData {
-                    outStatus.pointee = .haveData
-                    hasData = true
-                    return buffer
-                } else {
+                let isFirstAsk = hasPendingInput.withLock { pending -> Bool in
+                    defer { pending = false }
+                    return pending
+                }
+                guard isFirstAsk else {
                     outStatus.pointee = .noDataNow
                     return nil
                 }
+                outStatus.pointee = .haveData
+                return buffer
             }
             converter.convert(to: pcmBuffer, error: &error, withInputFrom: inputBlock)
             if let floatData = pcmBuffer.floatChannelData?[0] {

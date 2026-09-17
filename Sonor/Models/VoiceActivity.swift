@@ -4,7 +4,8 @@ import Foundation
 ///
 /// The live preview reads this. Without it the preview runs the transcription model again and
 /// again on the same silent buffer, and the text on screen keeps changing by itself.
-public enum VoiceActivity {
+/// The audio thread reads the threshold on every buffer, so nothing here may touch the main actor.
+nonisolated public enum VoiceActivity {
 
     /// `automatic` follows the room. `manual` uses the mark the user set on the meter.
     public enum Mode: String {
