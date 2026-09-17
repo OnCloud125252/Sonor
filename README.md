@@ -29,12 +29,25 @@ If you just want to use the app without dealing with code, ready-to-use releases
 <img width="1108" height="720" alt="1" src="https://github.com/user-attachments/assets/9d9e289b-eb32-45fb-af9a-d721cdef5a2d" />
 
 ### For Developers (Building from Source)
-If you want to play with the code, compile the app yourself, or contribute to the project, you can clone the repository. No extra submodules are required:
+If you want to play with the code, compile the app yourself, or contribute to the project, you can clone the repository. No extra submodules are required.
+
+You need **CMake**. Xcode uses it to build the speech engine in `sonor.cpp/`.
 
 ```bash
+brew install cmake
 git clone https://github.com/sonor-studio/Sonor.git
 ```
 Then, open `Sonor.xcodeproj` in Xcode and hit Run!
+
+The first build takes a few minutes, because the `Build sonor.cpp` phase compiles the engine into static libraries. Later builds reuse them and cost about 20 ms.
+
+You can also build from the terminal:
+
+```bash
+scripts/build-run.sh              # build Debug and start the app
+scripts/build-run.sh --release    # build Release
+scripts/build-engine.sh --clean   # rebuild the speech engine from scratch
+```
 
 ---
 
